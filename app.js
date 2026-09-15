@@ -1,0 +1,189 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import express from 'express';
+import * as OpenApiValidator from 'express-openapi-validator';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const app = express();
+app.use(express.json());
+
+app.use(
+  OpenApiValidator.middleware({
+    apiSpec: path.join(__dirname, 'openapi', 'openapi.yaml'),
+    validateRequests: true,
+    validateResponses: true,
+  }),
+);
+
+const products = [
+  { id: 1, title: 'Mechanical Keyboard', price_cents: 8999, in_stock: true },
+  { id: 2, title: 'Wireless Mouse', price_cents: 2499, in_stock: true },
+  { id: 3, title: '27-inch Monitor', price_cents: 24999, in_stock: false },
+  { id: 4, title: 'USB-C Dock', price_cents: 5999, in_stock: true },
+];
+
+const orders = [
+  {
+    id: 1,
+    items: [{ product_id: 1, quantity: 1 }],
+    total_cents: 8999,
+    status: 'new',
+    created_at: '2026-09-15T09:00:00.000Z',
+  },
+  {
+    id: 2,
+    items: [{ product_id: 2, quantity: 2 }],
+    total_cents: 4998,
+    status: 'paid',
+    created_at: '2026-09-15T09:01:00.000Z',
+  },
+  {
+    id: 3,
+    items: [
+      { product_id: 3, quantity: 1 },
+      { product_id: 4, quantity: 1 },
+    ],
+    total_cents: 30998,
+    status: 'shipped',
+    created_at: '2026-09-15T09:02:00.000Z',
+  },
+  {
+    id: 4,
+    items: [{ product_id: 4, quantity: 3 }],
+    total_cents: 17997,
+    status: 'new',
+    created_at: '2026-09-15T09:03:00.000Z',
+  },
+  {
+    id: 5,
+    items: [{ product_id: 1, quantity: 2 }],
+    total_cents: 17998,
+    status: 'paid',
+    created_at: '2026-09-15T09:04:00.000Z',
+  },
+];
+
+function problemInfo(status) {
+  if (status === 404) {
+    return { type: 'https://example.com/problems/not-found', title: 'Not Found' };
+  }
+  if (status >= 400 && status < 500) {
+    return { type: 'https://example.com/problems/validation-error', title: 'Validation Error' };
+  }
+  return { type: 'https://example.com/problems/internal-error', title: 'Internal Server Error' };
+}
+
+function sendProblem(res, req, status, detail) {
+  const { type, title } = problemInfo(status);
+
+  res
+    .status(status)
+    .type('application/problem+json')
+    .json({
+      type,
+      title,
+      status,
+      detail,
+      instance: req.originalUrl,
+    });
+}
+
+function encodeCursor(order) {
+  return Buffer.from(JSON.stringify({ created_at: order.created_at, id: order.id })).toString('base64url');
+}
+
+function decodeCursor(cursor) {
+  const json = Buffer.from(cursor, 'base64url').toString('utf8');
+  const decoded = JSON.parse(json);
+  if (typeof decoded !== 'object' || decoded === null || typeof decoded.created_at !== 'string' || typeof decoded.id !== 'number') {
+    throw new Error('invalid cursor shape');
+  }
+  return decoded;
+}
+
+app.get('/products', (req, res) => {
+  res.status(200).json(products);
+});
+
+app.get('/products/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const product = products.find((p) => p.id === id);
+  if (!product) {
+    return sendProblem(res, req, 404, `Product ${id} not found.`);
+  }
+  res.status(200).json(product);
+});
+
+app.get('/orders/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const order = orders.find((o) => o.id === id);
+  if (!order) {
+    return sendProblem(res, req, 404, `Order ${id} not found.`);
+  }
+  res.status(200).json(order);
+});
+
+app.post('/orders', (req, res) => {
+  const { items } = req.body;
+
+  let total_cents = 0;
+  for (const item of items) {
+    const product = products.find((p) => p.id === item.product_id);
+    if (!product) {
+      return sendProblem(res, req, 400, `Product ${item.product_id} does not exist.`);
+    }
+    total_cents += product.price_cents * item.quantity;
+  }
+
+  const order = {
+    id: orders.length ? Math.max(...orders.map((o) => o.id)) + 1 : 1,
+    items,
+    total_cents,
+    status: 'new',
+    created_at: new Date().toISOString(),
+  };
+
+  orders.push(order);
+  res.status(201).json(order);
+});
+
+app.get('/orders', (req, res) => {
+  const limit = req.query.limit !== undefined ? Number(req.query.limit) : 20;
+
+  const sorted = [...orders].sort((a, b) => {
+    if (a.created_at !== b.created_at) return a.created_at < b.created_at ? -1 : 1;
+    return a.id - b.id;
+  });
+
+  let startIndex = 0;
+  if (req.query.cursor !== undefined) {
+    let decoded;
+    try {
+      decoded = decodeCursor(req.query.cursor);
+    } catch {
+      return sendProblem(res, req, 400, 'The cursor query parameter is not a valid pagination token.');
+    }
+
+    startIndex = sorted.findIndex((order) => {
+      if (order.created_at !== decoded.created_at) return order.created_at > decoded.created_at;
+      return order.id > decoded.id;
+    });
+    if (startIndex === -1) startIndex = sorted.length;
+  }
+
+  const page = sorted.slice(startIndex, startIndex + limit);
+  const hasMore = startIndex + page.length < sorted.length;
+  const next_cursor = hasMore ? encodeCursor(page[page.length - 1]) : null;
+
+  res.status(200).json({ items: page, next_cursor });
+});
+
+app.use((err, req, res, next) => {
+  const status = err.status || 500;
+  sendProblem(res, req, status, err.message || 'An unexpected error occurred.');
+});
+
+app.listen(3000, () => {
+  console.log('Listening on http://localhost:3000');
+});
