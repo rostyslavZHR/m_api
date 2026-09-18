@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { BadRequestException, Injectable, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
 import { ProductsService } from '../products/products.service.js';
 
@@ -62,7 +63,7 @@ const orders: Order[] = [
 
 @Injectable()
 export class OrdersService {
-  private readonly idempotencyKeys = new Map<string, { bodyKey: string; order: Order }>();
+  private readonly idempotencyKeys = new Map<string, { body: { items: OrderItem[] }; order: Order }>();
 
   constructor(private readonly productsService: ProductsService) {}
 
@@ -100,11 +101,9 @@ export class OrdersService {
   }
 
   create(idempotencyKey: string, body: { items: OrderItem[] }): Order {
-    const bodyKey = JSON.stringify(body);
-
     const existing = this.idempotencyKeys.get(idempotencyKey);
     if (existing) {
-      if (existing.bodyKey !== bodyKey) {
+      if (!isDeepStrictEqual(existing.body, body)) {
         throw new UnprocessableEntityException('This Idempotency-Key was already used with a different request body.');
       }
       return existing.order;
@@ -128,7 +127,7 @@ export class OrdersService {
     };
 
     orders.push(order);
-    this.idempotencyKeys.set(idempotencyKey, { bodyKey, order });
+    this.idempotencyKeys.set(idempotencyKey, { body, order });
     return order;
   }
 
