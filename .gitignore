@@ -1,6 +1,13 @@
 # Dependencies
 node_modules/
 
+# Nest build output
+/dist
+*.tsbuildinfo
+
+# Test coverage
+/coverage
+
 # Logs
 logs
 *.log

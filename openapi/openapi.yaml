@@ -52,6 +52,12 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/Product'
+        '400':
+          description: The request includes an unknown query parameter
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
 
   /orders/{id}:
     get:
@@ -148,6 +154,12 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '422':
+          description: The Idempotency-Key was already used with a different request body
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
 
 components:
   schemas:
@@ -191,6 +203,7 @@ components:
 
     OrderItem:
       type: object
+      additionalProperties: false
       properties:
         product_id:
           type: integer
@@ -231,6 +244,7 @@ components:
 
     CreateOrder:
       type: object
+      additionalProperties: false
       properties:
         items:
           type: array
