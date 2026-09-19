@@ -1,0 +1,17 @@
+name: m_api
+services: 
+  db: 
+    image: postgres:16-alpine   
+    ports: 
+      - "21110:5432"
+    environment: 
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin-bootstrap-only
+      POSTGRES_DB: shop
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d shop"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
