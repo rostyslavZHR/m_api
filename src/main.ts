@@ -55,11 +55,12 @@ async function bootstrap() {
     },
   );
 
+  app.enableShutdownHooks()
+
   const config = app.get(ConfigService<Env, true>);
 
   const PORT = config.get('PORT', { infer: true });
   await app.listen(PORT);
 
-  app.enableShutdownHooks();
 }
 await bootstrap();
