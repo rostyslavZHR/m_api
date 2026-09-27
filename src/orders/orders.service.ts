@@ -11,7 +11,7 @@ export interface Order {
   id: number;
   items: OrderItem[];
   total_cents: number;
-  status: 'new' | 'paid' | 'shipped';
+  status: 'new' | 'paid' | 'shipped' | 'cancelled';
   created_at: string;
 }
 

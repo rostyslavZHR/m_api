@@ -86,13 +86,20 @@ cp .env.example .env
 
 The Postgres password is never read from an environment variable. `DbService`'s connection pool ([src/db/db.provider.ts](src/db/db.provider.ts)) reads it from `secrets/db_password` on every new connection (via `pg.Pool`'s `password` option, which accepts an async function) — that file is gitignored and never copied into the Docker image.
 
-Local Postgres for development:
+Local Postgres for development — one line to bring it up, one line to connect (both work on a clean clone, no setup beyond this):
 
 ```bash
 docker compose up -d
+psql "postgres://app_user:app-v1-password@localhost:21110/shop" -c "select current_user"
 ```
 
-This seeds `app_user` with the password from [init.sql](init.sql) (`app-v1-password`), matching the starting contents of `secrets/db_password`. `init.sql` only runs against an empty volume — `docker compose up -d` on an existing volume won't re-seed anything.
+`app_user`'s password there comes straight from [init.sql](init.sql), which is committed — this line needs nothing beyond the repo itself. `init.sql` only runs against an empty volume — `docker compose up -d` on an existing volume won't re-seed anything.
+
+The **app itself** doesn't take that password from the connection string — it reads it from `secrets/db_password`, which is gitignored and so doesn't exist yet on a fresh clone. Create it once, matching `init.sql`'s starting password, before running the app against this database:
+
+```bash
+mkdir -p secrets && printf 'app-v1-password' > secrets/db_password
+```
 
 ⚠️ `docker compose down -v` wipes that volume, so Postgres reverts to `init.sql`'s original password on the next `up`, while `secrets/db_password` keeps whatever `rotate.sh` last wrote there. That mismatch looks exactly like broken rotation (`password authentication failed`) but is really just a stale file — reset it back to `app-v1-password` after a volume wipe.
 
