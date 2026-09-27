@@ -7,11 +7,15 @@ import * as OpenApiValidator from 'express-openapi-validator';
 import { AppModule } from './app.module.js';
 import { buildProblem } from './common/problem.js';
 import { ProblemExceptionFilter } from './common/problem-exception.filter.js';
+import { Env } from './config/env.schema.js';
+import { ConfigService } from '@nestjs/config';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule, { bodyParser: false });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    bodyParser: false,
+  });
 
   app.use(express.json());
 
@@ -20,6 +24,7 @@ async function bootstrap() {
       apiSpec: path.join(__dirname, '..', 'openapi', 'openapi.yaml'),
       validateRequests: true,
       validateResponses: true,
+      ignorePaths: /^\/(health|db)(\/|$)/,
     }),
   );
 
@@ -29,14 +34,33 @@ async function bootstrap() {
   // own router, so its errors never reach ProblemExceptionFilter (a Nest
   // filter only sees exceptions from within Nest's request pipeline). This
   // is the fallback for that pre-router layer.
-  app.use((err: { status?: number; message?: string }, req: express.Request, res: express.Response, next: express.NextFunction) => {
-    const status = err.status || 500;
-    res
-      .status(status)
-      .type('application/problem+json')
-      .json(buildProblem(status, err.message || 'An unexpected error occurred.', req.originalUrl));
-  });
+  app.use(
+    (
+      err: { status?: number; message?: string },
+      req: express.Request,
+      res: express.Response,
+      next: express.NextFunction,
+    ) => {
+      const status = err.status || 500;
+      res
+        .status(status)
+        .type('application/problem+json')
+        .json(
+          buildProblem(
+            status,
+            err.message || 'An unexpected error occurred.',
+            req.originalUrl,
+          ),
+        );
+    },
+  );
 
-  await app.listen(process.env.PORT ?? 3000);
+  app.enableShutdownHooks()
+
+  const config = app.get(ConfigService<Env, true>);
+
+  const PORT = config.get('PORT', { infer: true });
+  await app.listen(PORT);
+
 }
 await bootstrap();

@@ -1,0 +1,21 @@
+name: m_api
+services: 
+  db: 
+    image: postgres:16-alpine   
+    ports: 
+      - "21110:5432"
+    environment: 
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin-bootstrap-only
+      POSTGRES_DB: shop
+    volumes:
+      - pgdata:/var/lib/postgresql/data                    # named volume: persists Postgres's data dir across container restarts/rebuilds
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro # bind mount: exposes this host file inside the container, read-only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d shop"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+volumes:
+  pgdata:
