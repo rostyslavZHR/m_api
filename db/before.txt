@@ -1,0 +1,66 @@
+=== q1 BEFORE ===
+                                                                                  QUERY PLAN                                                                                   
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=3417.58..3417.64 rows=25 width=29) (actual time=5.962..5.964 rows=27 loops=1)
+   Sort Key: created_at DESC
+   Sort Method: quicksort  Memory: 26kB
+   Buffers: shared hit=1670
+   ->  Seq Scan on orders  (cost=0.00..3417.00 rows=25 width=29) (actual time=1.264..5.927 rows=27 loops=1)
+         Filter: ((created_at >= '2026-03-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2026-06-01 00:00:00+00'::timestamp with time zone) AND (user_id = 42))
+         Rows Removed by Filter: 99973
+         Buffers: shared hit=1667
+ Planning:
+   Buffers: shared hit=100
+ Planning Time: 0.307 ms
+ Execution Time: 5.990 ms
+(12 rows)
+
+=== q2 BEFORE ===
+                                                   QUERY PLAN                                                    
+-----------------------------------------------------------------------------------------------------------------
+ Sort  (cost=3254.57..3258.67 rows=1640 width=32) (actual time=6.161..6.243 rows=1608 loops=1)
+   Sort Key: created_at DESC
+   Sort Method: quicksort  Memory: 136kB
+   Buffers: shared hit=1670
+   ->  Seq Scan on orders  (cost=0.00..3167.00 rows=1640 width=32) (actual time=0.450..5.843 rows=1608 loops=1)
+         Filter: ((created_at >= '2026-06-01 00:00:00+00'::timestamp with time zone) AND (status = 'new'::text))
+         Rows Removed by Filter: 98392
+         Buffers: shared hit=1667
+ Planning:
+   Buffers: shared hit=100
+ Planning Time: 0.320 ms
+ Execution Time: 6.342 ms
+(12 rows)
+
+=== q3 BEFORE ===
+                                               QUERY PLAN                                                
+---------------------------------------------------------------------------------------------------------
+ Seq Scan on products  (cost=0.00..5667.00 rows=500 width=54) (actual time=0.066..39.878 rows=1 loops=1)
+   Filter: (lower(name) = 'легкі кросівки 80'::text)
+   Rows Removed by Filter: 99999
+   Buffers: shared hit=4167
+ Planning:
+   Buffers: shared hit=69
+ Planning Time: 0.273 ms
+ Execution Time: 39.911 ms
+(8 rows)
+
+=== q4 BEFORE ===
+                                                      QUERY PLAN                                                       
+-----------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=5427.48..5427.53 rows=20 width=49) (actual time=12.607..12.611 rows=20 loops=1)
+   Buffers: shared hit=4173
+   ->  Sort  (cost=5427.48..5428.38 rows=360 width=49) (actual time=12.606..12.608 rows=20 loops=1)
+         Sort Key: (ts_rank(search_vector, '''шкіряні'' & ''кросівки'''::tsquery)) DESC, id
+         Sort Method: top-N heapsort  Memory: 27kB
+         Buffers: shared hit=4173
+         ->  Seq Scan on products  (cost=0.00..5417.90 rows=360 width=49) (actual time=0.054..12.529 rows=357 loops=1)
+               Filter: (search_vector @@ '''шкіряні'' & ''кросівки'''::tsquery)
+               Rows Removed by Filter: 99643
+               Buffers: shared hit=4167
+ Planning:
+   Buffers: shared hit=96
+ Planning Time: 0.353 ms
+ Execution Time: 12.649 ms
+(14 rows)
+

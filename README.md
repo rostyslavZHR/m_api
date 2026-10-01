@@ -65,14 +65,66 @@ curl -i -X POST http://localhost:3000/orders \
 
 Both 400s above come from the spec, not from code — there is no `if` anywhere in `src/` that checks for the `Idempotency-Key` header or inspects `items`. The validator rejects both requests before they reach a controller, purely because the spec declares the header `required: true` and `items` with `minItems: 1`.
 
+## Database: schema, seed, indexes
+
+Main table: orders (100,000 rows). Search table: products (100,000 rows).
+
+Bring the database up (blocks until the healthcheck passes):
+
+```bash
+docker compose up -d --wait
+```
+
+Connect (the password is the dev-only bootstrap password from [docker-compose.yml](docker-compose.yml)):
+
+```bash
+PGPASSWORD=admin-bootstrap-only psql -h localhost -p 21110 -U admin -d shop
+```
+
+Full sequence to reproduce the numbers in [db/OPTIMIZATIONS.md](db/OPTIMIZATIONS.md) — schema, seed, plans before, indexes, plans after:
+
+```bash
+export PGHOST=localhost PGPORT=21110 PGUSER=admin PGDATABASE=shop PGPASSWORD=admin-bootstrap-only
+
+docker compose down -v && docker compose up -d --wait
+psql -v ON_ERROR_STOP=1 -f db/schema.sql
+psql -v ON_ERROR_STOP=1 -f db/seed.sql
+
+for q in 1 2 3 4; do
+  echo "=== q$q BEFORE ==="
+  psql -c "EXPLAIN (ANALYZE, BUFFERS) $(cat db/queries/q$q.sql)"
+done > db/before.txt
+
+psql -v ON_ERROR_STOP=1 -f db/indexes.sql
+
+for q in 1 2 3 4; do
+  echo "=== q$q AFTER ==="
+  psql -c "EXPLAIN (ANALYZE, BUFFERS) $(cat db/queries/q$q.sql)"
+done > db/after.txt
+
+echo "=== q4 AFTER (warm) ===" >> db/after.txt
+psql -c "EXPLAIN (ANALYZE, BUFFERS) $(cat db/queries/q4.sql)" >> db/after.txt
+```
+
+`docker compose down -v` deletes the database volume, so every run starts from an empty database. User ids, quantities and order dates in the seed are random, so row counts for q1 and q2 differ slightly between runs; product names, prices and the search terms' match rates do not.
+
+| File | Purpose |
+|---|---|
+| [db/schema.sql](db/schema.sql) | `users`, `products` (with a stored `tsvector`), `orders`, `order_items` |
+| [db/seed.sql](db/seed.sql) | 1,000 users, 100,000 products, 100,000 orders, 200,000 order lines; ends with `VACUUM (ANALYZE)` |
+| [db/queries/](db/queries/) | `q1`–`q4`, one statement per file, no semicolon, so each works inside `$(cat …)` |
+| [db/indexes.sql](db/indexes.sql) | one index per query: composite, partial, expression, GIN |
+| [db/OPTIMIZATIONS.md](db/OPTIMIZATIONS.md) | before/after plans, index sizes, the Ukrainian morphology limitation |
+
 ## Configuration
 
 Environment variables are validated on startup by [src/config/env.schema.ts](src/config/env.schema.ts) via a zod schema, wired into `ConfigModule.forRoot({ validate })` in [src/app.module.ts](src/app.module.ts). A missing or malformed variable makes the process exit immediately with a non-zero code and a message naming every broken variable — never a runtime failure on the first request.
 
-| Variable | Required | Description |
-|---|---|---|
-| `PORT` | No (default `3000`) | Port the HTTP server listens on. |
-| `DB_URL` | Yes | Postgres connection string (`postgres://user@host:port/database`). Any password segment is ignored — a password embedded in an env var can't be rotated without a restart, which defeats the point below, so the pool always gets its password from `secrets/db_password` instead. |
+| Variable | Source | Required | Description |
+|---|---|---|---|
+| `PORT` | `.env` (template: `.env.example`) | No (default `3000`) | Port the HTTP server listens on. |
+| `DB_URL` | `.env` (template: `.env.example`) | Yes | Postgres connection string (`postgres://user@host:port/database`). Any password segment is ignored — a password embedded in an env var can't be rotated without a restart, which defeats the point below, so the pool always gets its password from `secrets/db_password` instead. |
+| DB password (not an env var) | `secrets/db_password` — gitignored secret file (HW#11), rotated by `rotate.sh` | Yes, to run the app against Postgres | Read fresh on every new connection, so the password rotates without a restart. See [Database password](#database-password). |
 
 Copy [.env.example](.env.example) to `.env` and adjust as needed:
 
@@ -86,13 +138,20 @@ cp .env.example .env
 
 The Postgres password is never read from an environment variable. `DbService`'s connection pool ([src/db/db.provider.ts](src/db/db.provider.ts)) reads it from `secrets/db_password` on every new connection (via `pg.Pool`'s `password` option, which accepts an async function) — that file is gitignored and never copied into the Docker image.
 
-Local Postgres for development:
+Local Postgres for development — one line to bring it up, one line to connect (both work on a clean clone, no setup beyond this):
 
 ```bash
 docker compose up -d
+psql "postgres://app_user:app-v1-password@localhost:21110/shop" -c "select current_user"
 ```
 
-This seeds `app_user` with the password from [init.sql](init.sql) (`app-v1-password`), matching the starting contents of `secrets/db_password`. `init.sql` only runs against an empty volume — `docker compose up -d` on an existing volume won't re-seed anything.
+`app_user`'s password there comes straight from [init.sql](init.sql), which is committed — this line needs nothing beyond the repo itself. `init.sql` only runs against an empty volume — `docker compose up -d` on an existing volume won't re-seed anything.
+
+The **app itself** doesn't take that password from the connection string — it reads it from `secrets/db_password`, which is gitignored and so doesn't exist yet on a fresh clone. Create it once, matching `init.sql`'s starting password, before running the app against this database:
+
+```bash
+mkdir -p secrets && printf 'app-v1-password' > secrets/db_password
+```
 
 ⚠️ `docker compose down -v` wipes that volume, so Postgres reverts to `init.sql`'s original password on the next `up`, while `secrets/db_password` keeps whatever `rotate.sh` last wrote there. That mismatch looks exactly like broken rotation (`password authentication failed`) but is really just a stale file — reset it back to `app-v1-password` after a volume wipe.
 
