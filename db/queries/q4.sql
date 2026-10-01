@@ -10,9 +10,12 @@
   The simple config does no stemming, so кросівок matches nothing.
   ts_rank is the same for every match in this seed data, so id breaks the tie
   and keeps the top 20 stable between runs.
+  deleted_at IS NULL hides discontinued products and matches the index's
+  WHERE, so the planner can use the partial index.
 */
 SELECT id, name, ts_rank(search_vector, plainto_tsquery('simple', 'шкіряні кросівки')) AS rank
 FROM products
 WHERE search_vector @@ plainto_tsquery('simple', 'шкіряні кросівки')
+  AND deleted_at IS NULL
 ORDER BY rank DESC, id
 LIMIT 20

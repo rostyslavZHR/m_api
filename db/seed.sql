@@ -12,11 +12,11 @@ SELECT count(*) FROM users; -- 1000
 -- C2 · products
 -- 'кросівки' is the rare noun (every 40th row, 2.5%) — the q4 search target.
 -- It must not appear in the common-noun list, or its share stops being 2.5%.
-INSERT INTO products (name, description, price_cents, in_stock)
+INSERT INTO products (name, description, price, in_stock)
 SELECT
     adj || ' ' || noun || ' ' || i,
     descr || ' ' || noun || ' для щоденного використання',
-    1000 + (i * 7919) % 499000, -- 10–5000 грн, same every run
+    (1000 + (i * 7919) % 499000) / 100.0, -- 10.00–4999.99 грн, same every run
     i % 11 <> 0 -- ~91% in stock; 11 is coprime with 40, so кросівки get the same ratio
 FROM generate_series(1, 100000) AS i
 CROSS JOIN LATERAL (
@@ -38,9 +38,9 @@ FROM products; -- 2.5
 -- user_id is random: 1 + i % 1000 would tie each user to one status,
 -- since 1000 is a multiple of 20 (every order of user 20 would be 'new').
 -- created_at is spread over the last year for q1's date-range filter.
--- total_cents is 0 here; C5 computes it from the lines.
+-- total is 0 here; C5 computes it from the lines.
 -- 'cancelled' is allowed by the schema's CHECK but deliberately not seeded.
-INSERT INTO orders (user_id, status, total_cents, created_at)
+INSERT INTO orders (user_id, status, total, created_at)
 SELECT
     1 + floor(random() * 1000)::int,
     CASE
@@ -58,12 +58,12 @@ SELECT status, count(*) FROM orders GROUP BY status ORDER BY count(*) DESC;
 -- 1–3 lines per order (n ≤ 1 + id % 3). Each line's product is picked by
 -- arithmetic on (order id, n): different n always gives a different product,
 -- so the (order_id, product_id) primary key never collides.
-INSERT INTO order_items (order_id, product_id, quantity, unit_price_cents, product_name)
+INSERT INTO order_items (order_id, product_id, quantity, unit_price, product_name)
 SELECT
     o.id,
     p.id,
     1 + floor(random() * 3)::int, -- 1–3
-    p.price_cents, -- snapshot
+    p.price, -- snapshot
     p.name -- snapshot
 FROM orders o
 CROSS JOIN generate_series(1, 3) AS n
@@ -74,13 +74,13 @@ SELECT count(*) FROM order_items; -- ~200000
 
 -- C5 · order totals
 -- The total is stored on the order (decision 9), so it's filled in once the lines exist.
-UPDATE orders o SET total_cents = (
-    SELECT coalesce(sum(oi.quantity * oi.unit_price_cents), 0)
+UPDATE orders o SET total = (
+    SELECT coalesce(sum(oi.quantity * oi.unit_price), 0)
     FROM order_items oi
     WHERE oi.order_id = o.id
 );
 
-SELECT count(*) FROM orders WHERE total_cents = 0; -- 0
+SELECT count(*) FROM orders WHERE total = 0; -- 0
 
 -- C6 · products size: how much of it is the tsvector column
 SELECT pg_size_pretty(pg_total_relation_size('products')) AS total,

@@ -7,7 +7,10 @@
   on lower(name), fixing the planner's default guess of 0.5% of the table.
   Works on Cyrillic because the database LC_CTYPE is en_US.utf8. Under the
   C locale, lower() leaves Cyrillic untouched and only lowercases Latin.
+  deleted_at IS NULL hides discontinued products and matches the index's
+  WHERE, so the planner can use the partial index.
 */
-SELECT id, name, price_cents, in_stock
+SELECT id, name, price, in_stock
 FROM products
 WHERE lower(name) = 'легкі кросівки 80'
+  AND deleted_at IS NULL

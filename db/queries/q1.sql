@@ -5,10 +5,10 @@
   then reads that user's date range as one contiguous slice. Reversed,
   (created_at, user_id) would scan the whole date range and filter user_id
   row by row. The index could also return rows already in date order, but
-  the planner prefers a bitmap scan plus an in-memory sort of the 27 rows,
-  since they sit on 27 scattered pages.
+  the planner prefers a bitmap scan plus an in-memory sort of the ~25 rows,
+  since they sit on as many scattered pages.
 */
-SELECT id, status, total_cents, created_at
+SELECT id, status, total, created_at
 FROM orders
 WHERE user_id = 42
   AND created_at >= '2026-03-01'

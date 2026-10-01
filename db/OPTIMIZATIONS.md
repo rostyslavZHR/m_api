@@ -3,16 +3,17 @@
 ## Baseline: dataset and storage
 
 Seeded by `db/seed.sql`: 1,000 users, 100,000 products, 100,000 orders,
-200,000 order lines. No indexes beyond primary keys.
+200,000 order lines. No indexes beyond primary keys and `order_items_product_id_idx`,
+which backs a foreign key rather than any of the four queries (see [Foreign key index](#foreign-key-index)).
 
 `products` after seeding and `VACUUM (ANALYZE)`:
 
 | Measure | Size |
 |---|---|
 | Total (`pg_total_relation_size`) | 35 MB |
-| Heap (`pg_relation_size`) | 33 MB |
+| Heap (`pg_relation_size`) | 32 MB |
 | Indexes (`pg_indexes_size`, primary key only) | 2.2 MB |
-| `search_vector` data (`sum(pg_column_size(search_vector))`) | 15 MB — ~45% of the heap |
+| `search_vector` data (`sum(pg_column_size(search_vector))`) | 15 MB — ~48% of the heap |
 
 The stored `tsvector` column nearly doubles the table's footprint. That is the
 cost of `GENERATED ... STORED`: the vector is kept on every row rather than
@@ -32,37 +33,37 @@ done
 
 | Query | Buffers | Execution time | Plan after | Index size |
 |---|---|---|---|---|
-| q1 | 1,670 → 36 | 5.990 → 0.175 ms | Bitmap scan on `orders_user_created_idx` | 3.0 MB |
-| q2 | 1,670 → 757 | 6.342 → 1.635 ms | Bitmap scan on `orders_new_created_idx` | 128 kB |
-| q3 | 4,167 → 4 | 39.911 → 0.064 ms | Index Scan on `products_lower_name_idx` | 5.7 MB |
-| q4 | 4,173 → 377 | 12.649 → 1.301 ms | Bitmap scan on `products_search_vector_idx` | 6.2 MB |
+| q1 | 1,605 → 35 | 6.218 → 0.160 ms | Bitmap scan on `orders_user_created_idx` | 3.0 MB |
+| q2 | 1,605 → 776 | 6.834 → 1.604 ms | Bitmap scan on `orders_new_created_idx` | 128 kB |
+| q3 | 4,150 → 4 | 36.460 → 0.095 ms | Index Scan on `products_lower_name_idx` | 5.7 MB |
+| q4 | 4,156 → 377 | 12.623 → 1.206 ms | Bitmap scan on `products_search_vector_idx` | 6.2 MB |
 
 Buffers are the stable comparison; timings are single runs and vary by a few ms between runs.
-The four indexes add 15.2 MB in total. Their cost on writes is not measured here.
+The four indexes add 15.1 MB in total. Their cost on writes is not measured here.
 
 ### q1
 
 One user's orders in a date range, newest first. Index: `orders_user_created_idx`. [`db/queries/q1.sql`](queries/q1.sql)
 
-`orders_user_created_idx` entered the plan as a Bitmap Index Scan, the Seq Scan on `orders` disappeared (the Sort stayed), and buffers fell from 1,670 to 36: 6 in the index, 27 for the heap pages holding the 27 matching rows, and 3 at the Sort node.
+`orders_user_created_idx` entered the plan as a Bitmap Index Scan, the Seq Scan on `orders` disappeared (the Sort stayed), and buffers fell from 1,605 to 35: 6 in the index, 26 for the heap pages holding the 26 matching rows, and 3 at the Sort node.
 
 Before:
 
 ```
                                                                                   QUERY PLAN                                                                                   
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Sort  (cost=3417.58..3417.64 rows=25 width=29) (actual time=5.962..5.964 rows=27 loops=1)
+ Sort  (cost=3352.58..3352.64 rows=25 width=28) (actual time=6.186..6.188 rows=26 loops=1)
    Sort Key: created_at DESC
    Sort Method: quicksort  Memory: 26kB
-   Buffers: shared hit=1670
-   ->  Seq Scan on orders  (cost=0.00..3417.00 rows=25 width=29) (actual time=1.264..5.927 rows=27 loops=1)
+   Buffers: shared hit=1605
+   ->  Seq Scan on orders  (cost=0.00..3352.00 rows=25 width=28) (actual time=0.545..6.161 rows=26 loops=1)
          Filter: ((created_at >= '2026-03-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2026-06-01 00:00:00+00'::timestamp with time zone) AND (user_id = 42))
-         Rows Removed by Filter: 99973
-         Buffers: shared hit=1667
+         Rows Removed by Filter: 99974
+         Buffers: shared hit=1602
  Planning:
    Buffers: shared hit=100
- Planning Time: 0.307 ms
- Execution Time: 5.990 ms
+ Planning Time: 0.306 ms
+ Execution Time: 6.218 ms
 (12 rows)
 ```
 
@@ -71,52 +72,52 @@ After:
 ```
                                                                                        QUERY PLAN                                                                                        
 -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Sort  (cost=96.57..96.63 rows=25 width=29) (actual time=0.137..0.139 rows=27 loops=1)
+ Sort  (cost=99.88..99.94 rows=26 width=28) (actual time=0.116..0.117 rows=26 loops=1)
    Sort Key: created_at DESC
    Sort Method: quicksort  Memory: 26kB
-   Buffers: shared hit=33 read=3
-   ->  Bitmap Heap Scan on orders  (cost=4.74..95.99 rows=25 width=29) (actual time=0.046..0.112 rows=27 loops=1)
+   Buffers: shared hit=32 read=3
+   ->  Bitmap Heap Scan on orders  (cost=4.75..99.27 rows=26 width=28) (actual time=0.039..0.095 rows=26 loops=1)
          Recheck Cond: ((user_id = 42) AND (created_at >= '2026-03-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2026-06-01 00:00:00+00'::timestamp with time zone))
-         Heap Blocks: exact=27
-         Buffers: shared hit=30 read=3
-         ->  Bitmap Index Scan on orders_user_created_idx  (cost=0.00..4.73 rows=25 width=0) (actual time=0.035..0.035 rows=27 loops=1)
+         Heap Blocks: exact=26
+         Buffers: shared hit=29 read=3
+         ->  Bitmap Index Scan on orders_user_created_idx  (cost=0.00..4.74 rows=26 width=0) (actual time=0.029..0.029 rows=26 loops=1)
                Index Cond: ((user_id = 42) AND (created_at >= '2026-03-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2026-06-01 00:00:00+00'::timestamp with time zone))
                Buffers: shared hit=3 read=3
  Planning:
    Buffers: shared hit=143 read=2
- Planning Time: 0.545 ms
- Execution Time: 0.175 ms
+ Planning Time: 0.472 ms
+ Execution Time: 0.160 ms
 (15 rows)
 ```
 
-The Sort stayed because Postgres chose a bitmap scan and sorted the 27 rows in memory, rather
+The Sort stayed because Postgres chose a bitmap scan and sorted the 26 rows in memory, rather
 than walking the index backwards in `created_at` order. `created_at` has almost no correlation
-with physical row order (0.00 in `pg_stats`), so the 27 rows sit on 27 different pages, and a
-bitmap scan reads them in physical order. Sorting 27 rows costs next to nothing.
+with physical row order (0.00 in `pg_stats`), so the 26 rows sit on 26 different pages, and a
+bitmap scan reads them in physical order. Sorting 26 rows costs next to nothing.
 
 ### q2
 
 Orders with status `'new'` since a date. Index: `orders_new_created_idx`. [`db/queries/q2.sql`](queries/q2.sql)
 
-`orders_new_created_idx` entered the plan as a Bitmap Index Scan, the Seq Scan on `orders` disappeared (the Sort stayed), and buffers fell from 1,670 to 757: 6 in the index, 748 in the heap because the 1,608 matching orders are spread over 748 pages, and 3 at the Sort node.
+`orders_new_created_idx` entered the plan as a Bitmap Index Scan, the Seq Scan on `orders` disappeared (the Sort stayed), and buffers fell from 1,605 to 776: 7 in the index, 766 in the heap because the 1,709 matching orders are spread over 766 pages, and 3 at the Sort node.
 
 Before:
 
 ```
                                                    QUERY PLAN                                                    
 -----------------------------------------------------------------------------------------------------------------
- Sort  (cost=3254.57..3258.67 rows=1640 width=32) (actual time=6.161..6.243 rows=1608 loops=1)
+ Sort  (cost=3191.33..3195.50 rows=1669 width=31) (actual time=6.614..6.706 rows=1709 loops=1)
    Sort Key: created_at DESC
-   Sort Method: quicksort  Memory: 136kB
-   Buffers: shared hit=1670
-   ->  Seq Scan on orders  (cost=0.00..3167.00 rows=1640 width=32) (actual time=0.450..5.843 rows=1608 loops=1)
+   Sort Method: quicksort  Memory: 147kB
+   Buffers: shared hit=1605
+   ->  Seq Scan on orders  (cost=0.00..3102.00 rows=1669 width=31) (actual time=0.361..6.231 rows=1709 loops=1)
          Filter: ((created_at >= '2026-06-01 00:00:00+00'::timestamp with time zone) AND (status = 'new'::text))
-         Rows Removed by Filter: 98392
-         Buffers: shared hit=1667
+         Rows Removed by Filter: 98291
+         Buffers: shared hit=1602
  Planning:
    Buffers: shared hit=100
- Planning Time: 0.320 ms
- Execution Time: 6.342 ms
+ Planning Time: 0.324 ms
+ Execution Time: 6.834 ms
 (12 rows)
 ```
 
@@ -125,21 +126,21 @@ After:
 ```
                                                                  QUERY PLAN                                                                 
 --------------------------------------------------------------------------------------------------------------------------------------------
- Sort  (cost=1859.24..1863.24 rows=1602 width=32) (actual time=1.433..1.520 rows=1608 loops=1)
+ Sort  (cost=1813.23..1817.36 rows=1653 width=31) (actual time=1.404..1.489 rows=1709 loops=1)
    Sort Key: created_at DESC
-   Sort Method: quicksort  Memory: 136kB
-   Buffers: shared hit=751 read=6
-   ->  Bitmap Heap Scan on orders  (cost=36.70..1773.97 rows=1602 width=32) (actual time=0.247..1.114 rows=1608 loops=1)
+   Sort Method: quicksort  Memory: 147kB
+   Buffers: shared hit=769 read=7
+   ->  Bitmap Heap Scan on orders  (cost=37.09..1724.87 rows=1653 width=31) (actual time=0.254..1.044 rows=1709 loops=1)
          Recheck Cond: ((created_at >= '2026-06-01 00:00:00+00'::timestamp with time zone) AND (status = 'new'::text))
-         Heap Blocks: exact=748
-         Buffers: shared hit=748 read=6
-         ->  Bitmap Index Scan on orders_new_created_idx  (cost=0.00..36.30 rows=1602 width=0) (actual time=0.160..0.160 rows=1608 loops=1)
+         Heap Blocks: exact=766
+         Buffers: shared hit=766 read=7
+         ->  Bitmap Index Scan on orders_new_created_idx  (cost=0.00..36.68 rows=1653 width=0) (actual time=0.168..0.168 rows=1709 loops=1)
                Index Cond: (created_at >= '2026-06-01 00:00:00+00'::timestamp with time zone)
-               Buffers: shared read=6
+               Buffers: shared read=7
  Planning:
    Buffers: shared hit=136
- Planning Time: 0.486 ms
- Execution Time: 1.635 ms
+ Planning Time: 0.436 ms
+ Execution Time: 1.604 ms
 (15 rows)
 ```
 
@@ -150,23 +151,23 @@ index. The heap reads dominate, so the saving is smaller than for q1.
 
 ### q3
 
-Case-insensitive product lookup by `lower(name)`. Index: `products_lower_name_idx`. [`db/queries/q3.sql`](queries/q3.sql)
+Case-insensitive lookup by `lower(name)` among live products (`deleted_at IS NULL`). Index: `products_lower_name_idx`. [`db/queries/q3.sql`](queries/q3.sql)
 
-`products_lower_name_idx` entered the plan as a plain Index Scan, the Seq Scan on `products` disappeared, and buffers fell from 4,167 to 4: the walk down the B-tree plus the one heap page holding the row.
+`products_lower_name_idx` entered the plan as a plain Index Scan, the Seq Scan on `products` disappeared, and buffers fell from 4,150 to 4: the walk down the B-tree plus the one heap page holding the row.
 
 Before:
 
 ```
                                                QUERY PLAN                                                
 ---------------------------------------------------------------------------------------------------------
- Seq Scan on products  (cost=0.00..5667.00 rows=500 width=54) (actual time=0.066..39.878 rows=1 loops=1)
-   Filter: (lower(name) = 'легкі кросівки 80'::text)
+ Seq Scan on products  (cost=0.00..5650.00 rows=500 width=52) (actual time=0.052..36.422 rows=1 loops=1)
+   Filter: ((deleted_at IS NULL) AND (lower(name) = 'легкі кросівки 80'::text))
    Rows Removed by Filter: 99999
-   Buffers: shared hit=4167
+   Buffers: shared hit=4150
  Planning:
-   Buffers: shared hit=69
- Planning Time: 0.273 ms
- Execution Time: 39.911 ms
+   Buffers: shared hit=72
+ Planning Time: 0.261 ms
+ Execution Time: 36.460 ms
 (8 rows)
 ```
 
@@ -175,13 +176,13 @@ After:
 ```
                                                             QUERY PLAN                                                             
 -----------------------------------------------------------------------------------------------------------------------------------
- Index Scan using products_lower_name_idx on products  (cost=0.42..8.44 rows=1 width=54) (actual time=0.030..0.030 rows=1 loops=1)
+ Index Scan using products_lower_name_idx on products  (cost=0.42..8.44 rows=1 width=52) (actual time=0.053..0.053 rows=1 loops=1)
    Index Cond: (lower(name) = 'легкі кросівки 80'::text)
    Buffers: shared hit=1 read=3
  Planning:
-   Buffers: shared hit=119 read=1
- Planning Time: 0.508 ms
- Execution Time: 0.064 ms
+   Buffers: shared hit=135 read=1
+ Planning Time: 0.574 ms
+ Execution Time: 0.095 ms
 (7 rows)
 ```
 
@@ -189,31 +190,38 @@ The row estimate went from 500 to 1. Before, Postgres had no statistics for `low
 its default guess of 0.5% of the table. `ANALYZE` after building the expression index collects
 statistics on the expression, so the estimate became exact.
 
+The index is partial (`WHERE deleted_at IS NULL`, the same condition as the query), and the
+planner ignores statistics collected for a partial index's expression. With the index alone,
+the estimate stayed at 500 and the plan became a Bitmap Heap Scan. `CREATE STATISTICS … ON
+(lower(name))` collects the same statistics over the whole table, which brings the estimate back
+to 1 and the plan back to an Index Scan. The `deleted_at` condition doesn't appear in the
+after-plan: the index holds only live rows, so there is nothing left to check.
+
 ### q4
 
-Full-text search for `шкіряні кросівки`, top 20 by rank. Index: `products_search_vector_idx`. [`db/queries/q4.sql`](queries/q4.sql)
+Full-text search for `шкіряні кросівки` among live products, top 20 by rank. Index: `products_search_vector_idx`. [`db/queries/q4.sql`](queries/q4.sql)
 
-`products_search_vector_idx` entered the plan as a Bitmap Index Scan, the Seq Scan on `products` disappeared (the Limit and top-N Sort stayed), and buffers fell from 4,173 to 377: 14 in the GIN index, 357 for the heap pages holding the 357 matches, and 6 at the Sort node.
+`products_search_vector_idx` entered the plan as a Bitmap Index Scan, the Seq Scan on `products` disappeared (the Limit and top-N Sort stayed), and buffers fell from 4,156 to 377: 14 in the GIN index, 357 for the heap pages holding the 357 matches, and 6 at the Sort node.
 
 Before:
 
 ```
                                                       QUERY PLAN                                                       
 -----------------------------------------------------------------------------------------------------------------------
- Limit  (cost=5427.48..5427.53 rows=20 width=49) (actual time=12.607..12.611 rows=20 loops=1)
-   Buffers: shared hit=4173
-   ->  Sort  (cost=5427.48..5428.38 rows=360 width=49) (actual time=12.606..12.608 rows=20 loops=1)
+ Limit  (cost=5410.54..5410.59 rows=20 width=49) (actual time=12.587..12.590 rows=20 loops=1)
+   Buffers: shared hit=4156
+   ->  Sort  (cost=5410.54..5411.44 rows=362 width=49) (actual time=12.586..12.587 rows=20 loops=1)
          Sort Key: (ts_rank(search_vector, '''шкіряні'' & ''кросівки'''::tsquery)) DESC, id
          Sort Method: top-N heapsort  Memory: 27kB
-         Buffers: shared hit=4173
-         ->  Seq Scan on products  (cost=0.00..5417.90 rows=360 width=49) (actual time=0.054..12.529 rows=357 loops=1)
-               Filter: (search_vector @@ '''шкіряні'' & ''кросівки'''::tsquery)
+         Buffers: shared hit=4156
+         ->  Seq Scan on products  (cost=0.00..5400.90 rows=362 width=49) (actual time=0.046..12.472 rows=357 loops=1)
+               Filter: ((deleted_at IS NULL) AND (search_vector @@ '''шкіряні'' & ''кросівки'''::tsquery))
                Rows Removed by Filter: 99643
-               Buffers: shared hit=4167
+               Buffers: shared hit=4150
  Planning:
-   Buffers: shared hit=96
- Planning Time: 0.353 ms
- Execution Time: 12.649 ms
+   Buffers: shared hit=99
+ Planning Time: 0.333 ms
+ Execution Time: 12.623 ms
 (14 rows)
 ```
 
@@ -222,30 +230,50 @@ After (warm):
 ```
                                                                      QUERY PLAN                                                                     
 ----------------------------------------------------------------------------------------------------------------------------------------------------
- Limit  (cost=1140.10..1140.15 rows=20 width=49) (actual time=1.248..1.251 rows=20 loops=1)
+ Limit  (cost=1114.69..1114.74 rows=20 width=49) (actual time=1.166..1.169 rows=20 loops=1)
    Buffers: shared hit=377
-   ->  Sort  (cost=1140.10..1141.01 rows=364 width=49) (actual time=1.247..1.248 rows=20 loops=1)
+   ->  Sort  (cost=1114.69..1115.57 rows=354 width=49) (actual time=1.165..1.167 rows=20 loops=1)
          Sort Key: (ts_rank(search_vector, '''шкіряні'' & ''кросівки'''::tsquery)) DESC, id
          Sort Method: top-N heapsort  Memory: 27kB
          Buffers: shared hit=377
-         ->  Bitmap Heap Scan on products  (cost=31.96..1130.42 rows=364 width=49) (actual time=0.337..1.168 rows=357 loops=1)
-               Recheck Cond: (search_vector @@ '''шкіряні'' & ''кросівки'''::tsquery)
+         ->  Bitmap Heap Scan on products  (cost=31.91..1105.27 rows=354 width=49) (actual time=0.278..1.097 rows=357 loops=1)
+               Recheck Cond: ((search_vector @@ '''шкіряні'' & ''кросівки'''::tsquery) AND (deleted_at IS NULL))
                Heap Blocks: exact=357
                Buffers: shared hit=371
-               ->  Bitmap Index Scan on products_search_vector_idx  (cost=0.00..31.87 rows=364 width=0) (actual time=0.304..0.304 rows=357 loops=1)
+               ->  Bitmap Index Scan on products_search_vector_idx  (cost=0.00..31.82 rows=354 width=0) (actual time=0.245..0.245 rows=357 loops=1)
                      Index Cond: (search_vector @@ '''шкіряні'' & ''кросівки'''::tsquery)
                      Buffers: shared hit=14
  Planning:
-   Buffers: shared hit=153
- Planning Time: 0.521 ms
- Execution Time: 1.301 ms
+   Buffers: shared hit=169
+ Planning Time: 0.496 ms
+ Execution Time: 1.206 ms
 (17 rows)
 ```
 
 This is the warm run: a second execution, all 377 buffers already in cache. The first run after
-building the index read the same 377 buffers in 1.643 ms; both are in `after.txt`. GIN always
+building the index read the same 377 buffers in 1.274 ms; both are in `after.txt`. GIN always
 produces a bitmap, never a plain index scan: it maps each word to a list of rows, and the AND of
 two words is an intersection of two lists. `Recheck Cond` re-tests each row against the query.
+The index is partial on `deleted_at IS NULL`, like q3's. A GIN bitmap is rechecked on the heap
+anyway, so `deleted_at IS NULL` shows up in the Recheck Cond, but it costs no extra pages.
+
+The seed deletes no products, so each partial index is the same size as a full one would be. Here
+the partial predicate keeps discontinued products out of search results; it doesn't save space.
+
+## Foreign key index
+
+Postgres doesn't index a foreign key's referencing column. `order_items` has two foreign keys:
+`order_id` is the left column of the primary key, so it's covered, but `product_id` had no index.
+Deleting a product then has to scan all 200,000 lines to check that none still reference it.
+`db/schema.sql` creates `order_items_product_id_idx` (4.5 MB) for this.
+
+Measured by deleting a newly inserted product that no order line references, inside a rolled-back
+transaction:
+
+| | `Trigger for constraint order_items_product_id_fkey` |
+|---|---|
+| Without the index | 7.290 ms |
+| With the index | 0.272 ms |
 
 ## Морфологія
 
