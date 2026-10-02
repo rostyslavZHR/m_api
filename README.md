@@ -201,3 +201,6 @@ The multi-stage [Dockerfile](Dockerfile) only copies `dist/`, `package*.json`, `
 | `rotate.sh` | rotates the DB password with no service restart |
 | `package.json` | ESM (`"type": "module"`), `scripts.start` runs `nest build && node dist/main.js` |
 | `.gitignore`, `.dockerignore` | `.env`/`secrets` excluded from both git and the Docker build context |
+
+
+1
