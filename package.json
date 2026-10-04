@@ -14,7 +14,14 @@
     "lint": "oxlint --type-aware src/ test/",
     "test": "vitest run",
     "test:e2e": "vitest run --config ./vitest.config.e2e.ts",
-    "check:env": "node scripts/check-env-example.js"
+    "check:env": "node scripts/check-env-example.js",
+    "migrate": "bash scripts/with-secrets.sh dev typeorm migration:run -d dist/data-source.js",
+    "migrate:show": "bash scripts/with-secrets.sh dev typeorm migration:show -d dist/data-source.js",
+    "migrate:revert": "bash scripts/with-secrets.sh dev typeorm migration:revert -d dist/data-source.js",
+    "migrate:generate": "bash scripts/with-secrets.sh dev typeorm migration:generate -d dist/data-source.js",
+    "seed": "bash scripts/with-secrets.sh dev node dist/seed.js",
+    "demo:nplus1": "bash scripts/with-secrets.sh dev node dist/demo-nplus1.js",
+    "report": "bash scripts/with-secrets.sh dev node dist/report.js"
   },
   "dependencies": {
     "@nestjs/common": "^12.0.3",
@@ -25,6 +32,7 @@
     "pg": "^8.23.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
+    "typeorm": "^1.1.1",
     "zod": "^4.6.5"
   },
   "devDependencies": {
