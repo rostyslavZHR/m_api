@@ -1,7 +1,12 @@
-import { Check, Column, Entity, Index, JoinColumn, ManyToOne, PrimaryColumn } from 'typeorm';
+import { Check, Column, Entity, Index, JoinColumn, ManyToOne, PrimaryColumn, type Relation } from 'typeorm';
 import { OrderEntity } from './order.entity.js';
 import { ProductEntity } from './product.entity.js';
 
+// Relation properties are typed Relation<…>: with emitDecoratorMetadata a plain
+// class type compiles to a reference that runs when the class is defined, and
+// the entities import each other — so one of them would still be uninitialised.
+// Relation<T> is just T, but emits Object instead.
+//
 // Composite key: each key column is declared twice — @PrimaryColumn makes it
 // part of the key, @ManyToOne + @JoinColumn with the same name makes it the
 // foreign key. Both map to one physical column.
@@ -20,11 +25,11 @@ export class OrderItemEntity {
 
   @ManyToOne(() => OrderEntity, (order) => order.items, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'order_id' })
-  order: OrderEntity;
+  order: Relation<OrderEntity>;
 
   @ManyToOne(() => ProductEntity, { onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'product_id' })
-  product: ProductEntity;
+  product: Relation<ProductEntity>;
 
   @Column('integer')
   quantity: number;

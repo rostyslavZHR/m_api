@@ -14,12 +14,12 @@ SELECT count(*) FROM users; -- 1000
 -- C2 · products
 -- 'кросівки' is the rare noun (every 40th row, 2.5%) — the q4 search target.
 -- It must not appear in the common-noun list, or its share stops being 2.5%.
-INSERT INTO products (name, description, price_cents, in_stock)
+INSERT INTO products (name, description, price_cents, stock)
 SELECT
     adj || ' ' || noun || ' ' || i,
     descr || ' ' || noun || ' для щоденного використання',
     1000 + (i * 7919) % 499000, -- 10.00–4999.99 UAH in cents, same every run
-    i % 11 <> 0 -- ~91% in stock; 11 is coprime with 40, so кросівки get the same ratio
+    CASE WHEN i % 11 <> 0 THEN 1 + i % 50 ELSE 0 END -- ~91% in stock (1–50 units); 11 is coprime with 40, so кросівки get the same ratio
 FROM generate_series(1, 100000) AS i
 CROSS JOIN LATERAL (
     SELECT

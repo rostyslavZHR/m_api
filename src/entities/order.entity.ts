@@ -8,6 +8,7 @@ import {
   ManyToOne,
   OneToMany,
   PrimaryGeneratedColumn,
+  type Relation,
 } from 'typeorm';
 import { UserEntity } from './user.entity.js';
 import { OrderItemEntity } from './order-item.entity.js';
@@ -30,7 +31,7 @@ export class OrderEntity {
 
   @ManyToOne(() => UserEntity, { onDelete: 'RESTRICT', nullable: false })
   @JoinColumn({ name: 'user_id' })
-  user: UserEntity;
+  user: Relation<UserEntity>;
 
   @Column('text', { default: 'new' })
   status: OrderStatus;
@@ -44,5 +45,5 @@ export class OrderEntity {
   createdAt: Date;
 
   @OneToMany(() => OrderItemEntity, (item) => item.order, { cascade: true })
-  items: OrderItemEntity[];
+  items: Relation<OrderItemEntity[]>;
 }
