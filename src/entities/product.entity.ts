@@ -5,6 +5,8 @@ import { Check, Column, DeleteDateColumn, Entity, Index, PrimaryGeneratedColumn 
 // SQL. TypeORM doesn't see them either, so they never show up in a diff.
 @Entity('products')
 @Check('products_price_cents_check', 'price_cents >= 0')
+// Backstop for oversell protection: whatever the code does, stock can't go negative.
+@Check('products_stock_check', 'stock >= 0')
 export class ProductEntity {
   @PrimaryGeneratedColumn('identity', { type: 'bigint', generatedIdentity: 'ALWAYS' })
   id: string; // bigint → string in pg
@@ -20,8 +22,10 @@ export class ProductEntity {
   @Column('bigint', { name: 'price_cents' })
   priceCents: string;
 
-  @Column('boolean', { name: 'in_stock', default: false })
-  inStock: boolean;
+  // Units on hand. Replaces the HW#12 in_stock boolean: "how many are left" is
+  // what checkout decrements.
+  @Column('integer', { default: 0 })
+  stock: number;
 
   // Soft delete: repo.softRemove() sets it, and find() skips rows where it's set.
   @DeleteDateColumn({ name: 'deleted_at', type: 'timestamptz' })

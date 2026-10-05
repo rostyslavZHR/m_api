@@ -95,6 +95,16 @@ and why it's an explicit entity rather than a `@ManyToMany` (decision 27).
 | 28 | Migration and script credentials from the **secret store**, through `scripts/with-secrets.sh` | `src/data-source.ts` has no host or password, only `MIGRATIONS_DB_URL` from the environment. Every DB script runs through the wrapper, so the store is the default path. `SKIP_VAULT=1` is the CI path, where the runner supplies the environment. The CLI connects as the schema owner, since `app_user` can't run DDL |
 | 29 | **The migrations are the only schema source** | `db/schema.sql` and `db/indexes.sql` described the same schema a second time and had already drifted (foreign keys without `ON DELETE` there, `RESTRICT` in the migration). They're removed; `db/` keeps only the HW#12 benchmark (bulk seed, queries, recorded plans), which runs on the migrated schema |
 
+### Concurrency
+
+| # | Decision | Reasoning |
+|---|---|---|
+| 30 | **`stock` integer replaces `in_stock`**, with `CHECK (stock >= 0)` | checkout needs "how many are left", which closes the old *product availability* question. The `CHECK` is a backstop: whatever the code does, stock can't go negative |
+| 31 | **`users.balance_cents`**, integer cents like all money (decision 6), with `CHECK (balance_cents >= 0)` | checkout debits the buyer; the `CHECK` is the same kind of backstop |
+| 32 | **Checkout is one `READ COMMITTED` transaction of guarded atomic updates** — `UPDATE … SET stock = stock - $n WHERE … AND stock >= $n RETURNING`, then the same for the balance — with the affected-row count checked after each, product locked before user | the check and the change are one statement, so there's no window between them; a waiting writer re-checks the `WHERE` against the committed row. Zero rows is the guard refusing, not an error — unchecked, a refusal looks like success. Either refusal throws and rolls the whole transaction back, so no orphan orders. One lock order means checkouts can't deadlock. `FOR UPDATE` would be needed only if the decision didn't fit in one expression |
+| 33 | **The job queue lives in Postgres** (`jobs`), and the receipt job is inserted in the checkout transaction | the job commits with the order or not at all — no dual write to a broker. Workers claim with `FOR UPDATE SKIP LOCKED … LIMIT 1` and hold the transaction while working, so a crashed worker's job returns to the queue; `processed` is incremented in SQL. Moves to RabbitMQ + transactional outbox later |
+| 34 | **Retry policy: only `40001` and `40P01`, the whole transaction, bounded (5 attempts), full jitter** | those two mean Postgres rolled the transaction back because of another one, and a rerun will likely succeed. Anything else fails identically again (a `CHECK` or unique violation) or isn't safe to repeat blindly (a connection lost during `COMMIT`). The whole transaction, reads included — retrying only the write is the lost update again |
+
 ## Queries the schema must serve
 
 Derived from the user stories — these are what the data layer is designed for,
@@ -112,14 +122,14 @@ and what its indexes exist for:
 - **Idempotency key storage.** Currently in-process, which is correct for one
   instance and wrong for two — a key held by instance A is invisible to B, and a
   restart loses all of them. Belongs in a table with the claim/finish state
-  machine, once there's transactional logic to attach it to
+  machine. Checkout (decision 32) is the transactional logic to attach it to, but
+  has no idempotency key yet — HW#14 didn't ask for one
 - **Order status as a state machine.** Currently a flat set of allowed values
   with no rules about transitions. Whether `shipped → pending` should be
   impossible at the database level, or enforced in the service, is undecided
 - **Are order lines truly immutable?** Decision 9 assumes so. If an order can be
   edited after creation, the stored total needs a rule for staying in sync
-- **Product availability** is currently a boolean. Whether it becomes real stock
-  tracking depends on whether any story needs "how many are left"
+- ~~**Product availability**~~ — resolved by decision 30: `stock` integer
 - **Authentication.** No credentials on `users`, no auth on any endpoint. The
   shape of it — sessions, JWT, where keys live — is not yet decided
 
@@ -133,3 +143,4 @@ and what its indexes exist for:
 | HW#12 review | Decision 6 changed: money is `numeric(12,2)`, superseding integer cents (6a) |
 | TypeORM data layer | Decisions 22–28 — ORM, migrations instead of `synchronize`, `onDelete` strategy, repository vs query builder, soft-deleted rows in reports, explicit join entity, credentials from the store. Decision 2 corrected: it was recorded as done, but the code still validates against the hand-written spec, so it's marked as planned and 2a as current |
 | HW#13 review | Decision 6 reversed: money is integer cents (`bigint`), as the brief requires; `numeric(12,2)` becomes 6a, converted by the `MoneyToMinorUnits` migration. Decision 29: the migrations are the only schema source; `db/schema.sql` and `db/indexes.sql` removed |
+| HW#14 concurrency | Decisions 30–34 — `stock` and `balance_cents` with `CHECK` backstops, checkout as guarded atomic updates in one transaction, the job queue in Postgres with `SKIP LOCKED` workers, the retry policy. *Product availability* resolved |

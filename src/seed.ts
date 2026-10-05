@@ -1,6 +1,7 @@
 import { In, type EntityManager } from 'typeorm';
 import { dataSource } from './data-source.js';
 import { OrderEntity, OrderItemEntity, ProductEntity, UserEntity, type OrderStatus } from './entities/index.js';
+import { BROKE_USER_EMAIL, RACE_PRODUCT, USER_BALANCE_CENTS } from './seed-fixtures.js';
 
 // Idempotent without explicit ids: ids are GENERATED ALWAYS, so every row is
 // found again by a natural key — email for users, name for products, and a
@@ -11,6 +12,11 @@ const ORDER_COUNT = 60; // the N+1 demo compares 10 and 50 orders
 const USERS_CREATED_AT = new Date(Date.UTC(2025, 11, 1));
 const FIRST_ORDER_AT = Date.UTC(2026, 0, 1);
 const HOUR_MS = 3_600_000;
+const INITIAL_STOCK = 100;
+
+// USER_BALANCE_CENTS, BROKE_USER_EMAIL and RACE_PRODUCT live in seed-fixtures.ts, so the demos can
+// look them up. RACE_PRODUCT stays out of PRODUCTS: orders pick their products
+// by position in that list, so an 11th entry would reshuffle every seeded order.
 
 const PRODUCTS = [
   { name: 'Шкіряні кросівки', description: 'Шкіряні кросівки для щоденного використання', priceCents: 349900 },
@@ -41,18 +47,28 @@ function statusFor(orderIndex: number): OrderStatus {
   return 'paid';
 }
 
-// The unique email makes this a true upsert. created_at is passed explicitly, or
-// its DEFAULT now() would differ on every fresh database; on conflict the row is
-// rewritten with the same value. Sorted by email, so users[i] is the same user
-// on every run.
+// The unique email makes this a true upsert. created_at and the balance are
+// passed explicitly; on conflict upsert rewrites every supplied column, so each
+// run resets them to the same values. Sorted by email, so users[i] is the same
+// user on every run.
 async function seedUsers(manager: EntityManager): Promise<UserEntity[]> {
   const emails = Array.from({ length: USER_COUNT }, (_, index) => `user${index + 1}@example.com`);
   await manager.upsert(
     UserEntity,
-    emails.map((email) => ({ email, createdAt: USERS_CREATED_AT })),
+    emails.map((email) => ({ email, createdAt: USERS_CREATED_AT, balanceCents: toBigint(USER_BALANCE_CENTS) })),
     ['email'],
   );
   return manager.find(UserEntity, { where: { email: In(emails) }, order: { email: 'ASC' } });
+}
+
+// A separate upsert, so the oversized balance above never touches this user.
+// Not returned: no seeded order belongs to them.
+async function seedBrokeUser(manager: EntityManager): Promise<void> {
+  await manager.upsert(
+    UserEntity,
+    { email: BROKE_USER_EMAIL, createdAt: USERS_CREATED_AT, balanceCents: toBigint(0) },
+    ['email'],
+  );
 }
 
 // No unique key on name, so look up first. withDeleted, or a soft-deleted
@@ -67,13 +83,28 @@ async function seedProducts(manager: EntityManager): Promise<SeededProduct[]> {
           name: product.name,
           description: product.description,
           priceCents: toBigint(product.priceCents),
-          inStock: true,
+          stock: INITIAL_STOCK,
         }),
       );
     }
     seeded.push({ entity, priceCents: product.priceCents });
   }
   return seeded;
+}
+
+// Looked up by name like the others, so it's created once. A second run doesn't
+// reset its stock after a race — the race demo resets its own preconditions.
+async function seedRaceProduct(manager: EntityManager): Promise<void> {
+  const existing = await manager.findOne(ProductEntity, { where: { name: RACE_PRODUCT.name }, withDeleted: true });
+  if (existing) return;
+  await manager.save(
+    manager.create(ProductEntity, {
+      name: RACE_PRODUCT.name,
+      description: RACE_PRODUCT.description,
+      priceCents: toBigint(RACE_PRODUCT.priceCents),
+      stock: RACE_PRODUCT.stock,
+    }),
+  );
 }
 
 // 1–3 lines per order. Offsets 0, 3, 6 out of 10 keep an order's lines on
@@ -122,7 +153,9 @@ try {
   // One transaction: a crash halfway leaves nothing, so the next run starts clean.
   await dataSource.transaction(async (manager) => {
     const users = await seedUsers(manager);
+    await seedBrokeUser(manager);
     const products = await seedProducts(manager);
+    await seedRaceProduct(manager);
     await seedOrders(manager, users, products);
   });
 } finally {
