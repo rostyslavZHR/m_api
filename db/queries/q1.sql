@@ -8,7 +8,7 @@
   the planner prefers a bitmap scan plus an in-memory sort of the ~25 rows,
   since they sit on as many scattered pages.
 */
-SELECT id, status, total, created_at
+SELECT id, status, total_cents, created_at
 FROM orders
 WHERE user_id = 42
   AND created_at >= '2026-03-01'
