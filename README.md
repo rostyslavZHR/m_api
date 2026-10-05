@@ -4,6 +4,61 @@
 
 [src/](src/) is a NestJS application (Express platform under the hood) with in-memory data (4 products, 5 orders, split into `ProductsModule` and `OrdersModule`). `express-openapi-validator` is mounted as raw Express middleware in [src/main.ts](src/main.ts) and validates every request and every response against [openapi/openapi.yaml](openapi/openapi.yaml). Errors are translated to `application/problem+json` in two places: a global Nest exception filter ([src/common/problem-exception.filter.ts](src/common/problem-exception.filter.ts)) for exceptions thrown inside controllers/services, and a small fallback error-handling middleware in `main.ts` for the validator's own errors, since those are raised before Nest's router runs and never reach the filter.
 
+## Grading
+
+The DB scripts normally load credentials from the local store through `scripts/with-secrets.sh`. On a fresh clone there is no store, so the values come from the environment instead (`SKIP_VAULT=1`). They're the dev-only bootstrap account committed in [docker-compose.yml](docker-compose.yml), not a secret.
+
+```bash
+docker compose up -d --wait
+export MIGRATIONS_DB_URL=postgres://admin:admin-bootstrap-only@localhost:21110/shop
+export SKIP_VAULT=1    # the grader has no access to the store
+
+npm ci && npx tsc --noEmit
+npm run build
+npm run migrate && npm run migrate:show
+npm run migrate:revert && npm run migrate
+npm run seed && npm run seed
+docker compose exec db psql -U admin -d shop -Atc \
+  "SELECT (SELECT count(*) FROM users), (SELECT count(*) FROM products), (SELECT count(*) FROM orders), (SELECT count(*) FROM order_items)"
+npm run demo:nplus1
+npm run report
+```
+
+The row counts are `10|10|60|120` after the first seed and after the second.
+
+## TypeORM data layer
+
+The HW#12 schema as entities in [src/entities/](src/entities/), created by the migration in [src/migrations/](src/migrations/). `synchronize: false` in [src/data-source.ts](src/data-source.ts): the schema changes only through reviewed migrations.
+
+| Script | Does |
+|---|---|
+| `npm run migrate` / `migrate:show` / `migrate:revert` | apply, list, undo migrations |
+| `npm run migrate:generate -- src/migrations/Name` | diff entities against the live DB into a new migration |
+| `npm run seed` | deterministic, idempotent seed: 10 users, 10 products, 60 orders, 120 lines |
+| `npm run demo:nplus1` | N+1 before/after, see [N+1](#n1) |
+| `npm run report` | revenue per product via the query builder, see [Report](#report) |
+
+All of them read `dist/`, so run `npm run build` first.
+
+**Money is integer minor units** — `price_cents`, `total_cents`, `unit_price_cents` as `bigint` cents (`349900` = 3499.00 UAH), as the brief asks. No float anywhere; arithmetic is integer addition and multiplication. `pg` returns `bigint` as a string, so nothing is lost on the way into JS. The `Init` migration created these columns as `numeric(12,2)`; the `MoneyToMinorUnits` migration converts them in place — see [ARCHITECTURE.md](ARCHITECTURE.md) decision 6.
+
+**`onDelete` choices:**
+
+| Foreign key | `onDelete` | Why |
+|---|---|---|
+| `order_items.order_id → orders` | `CASCADE` | a line has no meaning without its order |
+| `order_items.product_id → products` | `RESTRICT` | a sold product must not vanish from order history; products are soft-deleted instead (`deleted_at`) |
+| `orders.user_id → users` | `RESTRICT` | orders are financial records and outlive any cleanup of users |
+
+**Migrations:**
+
+| Migration | What it does |
+|---|---|
+| `Init` | generated: every table, constraint and index. Hand-written inside it: `products_lower_name_idx` (an index on `lower(name)`) and its `CREATE STATISTICS`, which TypeORM can't describe, and `CREATE TABLE IF NOT EXISTS typeorm_metadata`, which the generator relies on for `search_vector` but doesn't emit itself |
+| `MoneyToMinorUnits` | hand-written: renames `price`/`total`/`unit_price` to `*_cents` and converts them from `numeric(12,2)` to `bigint` cents in place (`round(x * 100)`). The generator sees a rename as `DROP` + `ADD`, which would lose every price. `down()` converts back exactly |
+
+`Init` is never edited once it has run anywhere; a schema change is a new migration.
+
 ## Run
 
 Requires Node 24+ (`check:env` relies on Node's built-in TypeScript type stripping; older versions throw an unknown-extension error on `.ts` files).
@@ -81,40 +136,70 @@ Connect (the password is the dev-only bootstrap password from [docker-compose.ym
 PGPASSWORD=admin-bootstrap-only psql -h localhost -p 21110 -U admin -d shop
 ```
 
-Full sequence to reproduce the numbers in [db/OPTIMIZATIONS.md](db/OPTIMIZATIONS.md) — schema, seed, plans before, indexes, plans after:
+**The schema has one source: the migrations in [src/migrations/](src/migrations/).** Tables, constraints, every index and the statistics object come from `npm run migrate`; `db/` only holds the HW#12 benchmark — a bulk dataset, the four queries and their recorded plans.
+
+Sequence to reproduce the plans in [db/OPTIMIZATIONS.md](db/OPTIMIZATIONS.md) — schema, bulk seed, plans without the query indexes, plans with them:
 
 ```bash
 export PGHOST=localhost PGPORT=21110 PGUSER=admin PGDATABASE=shop PGPASSWORD=admin-bootstrap-only
 
 docker compose down -v && docker compose up -d --wait
-psql -v ON_ERROR_STOP=1 -f db/schema.sql
+npm run build && npm run migrate
 psql -v ON_ERROR_STOP=1 -f db/seed.sql
 
+# before: the four query indexes and the statistics object dropped inside a
+# transaction that is rolled back, so the schema is untouched afterwards
 for q in 1 2 3 4; do
   echo "=== q$q BEFORE ==="
-  psql -c "EXPLAIN (ANALYZE, BUFFERS) $(cat db/queries/q$q.sql)"
+  psql -q <<SQL
+BEGIN;
+DROP INDEX orders_user_created_idx, orders_new_created_idx, products_lower_name_idx, products_search_vector_idx;
+DROP STATISTICS products_lower_name_stat;
+EXPLAIN (ANALYZE, BUFFERS) $(cat db/queries/q$q.sql);
+ROLLBACK;
+SQL
 done > db/before.txt
-
-psql -v ON_ERROR_STOP=1 -f db/indexes.sql
 
 for q in 1 2 3 4; do
   echo "=== q$q AFTER ==="
   psql -c "EXPLAIN (ANALYZE, BUFFERS) $(cat db/queries/q$q.sql)"
 done > db/after.txt
-
-echo "=== q4 AFTER (warm) ===" >> db/after.txt
-psql -c "EXPLAIN (ANALYZE, BUFFERS) $(cat db/queries/q4.sql)" >> db/after.txt
 ```
 
-`docker compose down -v` deletes the database volume, so every run starts from an empty database. User ids, quantities and order dates in the seed are random, so row counts for q1 and q2 differ slightly between runs; product names, prices and the search terms' match rates do not.
+`docker compose down -v` deletes the database volume, so every run starts from an empty database. User ids, quantities and order dates in the seed are random, so row counts for q1 and q2 differ slightly between runs; product names, prices and the search terms' match rates do not. The committed `before.txt` / `after.txt` are the HW#12 measurements, taken when the schema still came from SQL files and money was `numeric`.
 
 | File | Purpose |
 |---|---|
-| [db/schema.sql](db/schema.sql) | `users`, `products` (with a stored `tsvector`), `orders`, `order_items` |
-| [db/seed.sql](db/seed.sql) | 1,000 users, 100,000 products, 100,000 orders, 200,000 order lines; ends with `VACUUM (ANALYZE)` |
+| [db/seed.sql](db/seed.sql) | 1,000 users, 100,000 products, 100,000 orders, 200,000 order lines on the migrated schema; ends with `VACUUM (ANALYZE)` |
 | [db/queries/](db/queries/) | `q1`–`q4`, one statement per file, no semicolon, so each works inside `$(cat …)` |
-| [db/indexes.sql](db/indexes.sql) | one index per query: composite, partial, expression, GIN |
 | [db/OPTIMIZATIONS.md](db/OPTIMIZATIONS.md) | before/after plans, index sizes, the Ukrainian morphology limitation |
+
+## N+1
+
+`npm run demo:nplus1` ([src/demo-nplus1.ts](src/demo-nplus1.ts)) loads orders with their items and each item's product — two levels of relation — at two collection sizes, and counts the SQL statements TypeORM sends. Measured on the seed data:
+
+| Strategy | n = 10 | n = 50 |
+|---|---|---|
+| query per order in a loop | 11 | 51 |
+| `relations` (LEFT JOIN) | 1 | 1 |
+| `leftJoinAndSelect` | 1 | 1 |
+| `relationLoadStrategy: 'query'` | 4 | 4 |
+
+The naive version grows with the collection (1 + N): one query for the orders, then one per order for its lines. Every fix stays constant. `relationLoadStrategy: 'query'` sends one query per relation level instead of joining — 4 here, within the 1 + 2 × 2 bound for two levels. Every strategy returns the same 10 orders and 19 lines at n = 10, so the fixes don't load less data, only fewer round-trips.
+
+The orders are picked by id before counting, not with `take`: `take` together with `relations` makes TypeORM send a separate distinct-ids query first.
+
+## Report
+
+`npm run report` ([src/report.ts](src/report.ts)): revenue per product, via `createQueryBuilder().getRawMany()`.
+
+**Repository or QueryBuilder:** the repository while the result is an entity or an entity graph — CRUD, a filtered list, an order with its lines. The query builder the moment the result isn't an entity: aggregates, `GROUP BY`, report rows. The line is the shape of what comes back, not how hard the query is.
+
+The report uses `.withDeleted()`: revenue is history, and a soft-deleted product still had its sales. Without it, the query builder adds `deleted_at IS NULL` just as `find()` does, and past revenue would change the day a product is discontinued.
+
+⚠️ `.withDeleted()` must come **before** the joins. Each `innerJoin()` writes the `deleted_at IS NULL` condition into its `ON` clause when it's called, so a later `.withDeleted()` leaves the joined products filtered. Checked by soft-deleting a product: with the call after the joins it vanished from the report (total 2102160.00 → 1310184.00 UAH, measured before the switch to cents); before the joins it stays.
+
+Revenue comes back as `revenue_cents`, in cents.
 
 ## Configuration
 
@@ -125,6 +210,7 @@ Environment variables are validated on startup by [src/config/env.schema.ts](src
 | `PORT` | `.env` (template: `.env.example`) | No (default `3000`) | Port the HTTP server listens on. |
 | `DB_URL` | `.env` (template: `.env.example`) | Yes | Postgres connection string (`postgres://user@host:port/database`). Any password segment is ignored — a password embedded in an env var can't be rotated without a restart, which defeats the point below, so the pool always gets its password from `secrets/db_password` instead. |
 | DB password (not an env var) | `secrets/db_password` — gitignored secret file (HW#11), rotated by `rotate.sh` | Yes, to run the app against Postgres | Read fresh on every new connection, so the password rotates without a restart. See [Database password](#database-password). |
+| `MIGRATIONS_DB_URL` | `.secrets/infisical.env` — gitignored, loaded by `scripts/with-secrets.sh` | Yes, for `migrate*`, `seed`, `demo:nplus1`, `report` | Connection string for the TypeORM CLI and DB scripts, as the schema owner (migrations run DDL, which `app_user` can't). Not read by the app, so it isn't in `.env.example` — `check:env` would reject it. See [DB scripts and secrets](#db-scripts-and-secrets). |
 
 Copy [.env.example](.env.example) to `.env` and adjust as needed:
 
@@ -133,6 +219,30 @@ cp .env.example .env
 ```
 
 `npm run check:env` verifies `.env.example` stays in sync with the schema (fails with exit 1 if a variable is added to one but not the other).
+
+### DB scripts and secrets
+
+The DB scripts (`npm run migrate`, `migrate:show`, `migrate:revert`, `migrate:generate`, `seed`, `demo:nplus1`, `report`) run through [scripts/with-secrets.sh](scripts/with-secrets.sh), which loads `.secrets/infisical.env` into the environment and then `exec`s the command. Create the store once (the URL below is the dev-only bootstrap account already committed in [docker-compose.yml](docker-compose.yml), not a leaked credential — a real environment's store holds its own):
+
+```bash
+mkdir -p .secrets
+echo 'MIGRATIONS_DB_URL=postgres://admin:admin-bootstrap-only@localhost:21110/shop' > .secrets/infisical.env
+```
+
+Without the store, export the variable yourself and skip it:
+
+```bash
+MIGRATIONS_DB_URL=postgres://… SKIP_VAULT=1 npm run migrate
+```
+
+[src/data-source.ts](src/data-source.ts) has no default: if `MIGRATIONS_DB_URL` is missing it throws instead of connecting somewhere unexpected. The scripts read `dist/`, so run `npm run build` first.
+
+Generate a migration from the entities (the name goes after `--`):
+
+```bash
+npm run build
+npm run migrate:generate -- src/migrations/AddOrders
+```
 
 ### Database password
 
@@ -194,6 +304,13 @@ The multi-stage [Dockerfile](Dockerfile) only copies `dist/`, `package*.json`, `
 | `src/config/env.schema.ts` | zod schema for all env vars, fail-fast `validate()` |
 | `src/db/` | `DbModule`/`DbService`/`DbController` — pg pool factory, `/db` health query |
 | `src/health-check/` | dependency-free `/health` module (`{ uptimeSec }`) |
+| `src/entities/` | TypeORM entities for the HW#12 schema; `index.ts` exports them and the list the DataSource registers |
+| `src/migrations/` | the only schema source: `Init` (generated, hand-written parts marked) and `MoneyToMinorUnits` (hand-written) |
+| `src/data-source.ts` | DataSource for the CLI and DB scripts: `synchronize: false`, URL from `MIGRATIONS_DB_URL` |
+| `src/seed.ts` | deterministic, idempotent seed |
+| `src/demo-nplus1.ts`, `src/common/query-count-logger.ts` | N+1 demo and the logger that counts its queries |
+| `src/report.ts`, `src/reports/` | report runner and the query-builder report itself |
+| `scripts/with-secrets.sh` | loads `.secrets/infisical.env` and runs the command; `SKIP_VAULT=1` skips the store |
 | `.env.example` | env var contract, kept in sync with the schema via `npm run check:env` |
 | `scripts/check-env-example.js` | diffs `.env.example` against the schema in both directions |
 | `secrets/db_password` | gitignored password file, read fresh on every new DB connection |

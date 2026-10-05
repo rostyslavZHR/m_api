@@ -18,6 +18,7 @@ npm-debug.log*
 .env.*
 !.env.example
 secrets
+.secrets/
 
 # Generated from openapi/openapi.yaml (npx @redocly/cli bundle)
 spec.json

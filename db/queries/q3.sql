@@ -10,7 +10,7 @@
   deleted_at IS NULL hides discontinued products and matches the index's
   WHERE, so the planner can use the partial index.
 */
-SELECT id, name, price, in_stock
+SELECT id, name, price_cents, in_stock
 FROM products
 WHERE lower(name) = 'легкі кросівки 80'
   AND deleted_at IS NULL
