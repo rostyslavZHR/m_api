@@ -1,13 +1,14 @@
 import type { DataSource } from 'typeorm';
 import { OrderItemEntity } from '../entities/index.js';
 
-// Every value arrives as a string: SUM over integer is bigint, SUM over numeric
-// is numeric, and pg returns both as strings to avoid losing precision.
+// Every value arrives as a string: SUM(integer) is bigint and SUM(bigint) is
+// numeric, and pg returns both as strings to avoid losing precision. Revenue is
+// in minor units (cents), like every money column.
 export interface RevenueByProductRow {
   product_id: string;
   name: string;
   units: string;
-  revenue: string;
+  revenue_cents: string;
 }
 
 // Revenue per product over non-cancelled orders, highest first. A report row
@@ -30,14 +31,14 @@ export function revenueByProduct(dataSource: DataSource): Promise<RevenueByProdu
       .select('product.id', 'product_id')
       .addSelect('product.name', 'name')
       .addSelect('SUM(item.quantity)', 'units')
-      .addSelect('SUM(item.quantity * item.unitPrice)', 'revenue')
+      .addSelect('SUM(item.quantity * item.unitPriceCents)', 'revenue_cents')
       .where('orders.status <> :cancelled', { cancelled: 'cancelled' })
       // product.id alone: it's the primary key, so product.name is functionally
       // dependent on it.
       .groupBy('product.id')
       // Lowercase snake_case aliases: Postgres folds unquoted identifiers, so a
       // camelCase alias would need quoting here.
-      .orderBy('revenue', 'DESC')
+      .orderBy('revenue_cents', 'DESC')
       .getRawMany<RevenueByProductRow>()
   );
 }

@@ -30,9 +30,9 @@ interface SeededProduct {
   priceCents: number;
 }
 
-// Money is summed in integer cents and turned into a numeric string only at the
-// end, so no decimal float is ever added up.
-const centsToNumeric = (cents: number) => (cents / 100).toFixed(2);
+// Money is integer minor units end to end — summed as integers, never as
+// decimal floats. bigint columns take strings in TypeORM.
+const toBigint = (cents: number) => String(cents);
 
 // 5% new, 20% shipped, 75% paid — the HW#12 split.
 function statusFor(orderIndex: number): OrderStatus {
@@ -66,7 +66,7 @@ async function seedProducts(manager: EntityManager): Promise<SeededProduct[]> {
         manager.create(ProductEntity, {
           name: product.name,
           description: product.description,
-          price: centsToNumeric(product.priceCents),
+          priceCents: toBigint(product.priceCents),
           inStock: true,
         }),
       );
@@ -102,13 +102,13 @@ async function seedOrders(manager: EntityManager, users: UserEntity[], products:
     const order = manager.create(OrderEntity, {
       user,
       status: statusFor(orderIndex),
-      total: centsToNumeric(totalCents),
+      totalCents: toBigint(totalCents),
       createdAt,
       items: lines.map((line) =>
         manager.create(OrderItemEntity, {
           product: line.entity,
           quantity: line.quantity,
-          unitPrice: centsToNumeric(line.priceCents),
+          unitPriceCents: toBigint(line.priceCents),
           productName: line.entity.name,
         }),
       ),

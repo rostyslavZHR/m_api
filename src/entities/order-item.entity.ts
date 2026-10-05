@@ -7,7 +7,7 @@ import { ProductEntity } from './product.entity.js';
 // foreign key. Both map to one physical column.
 @Entity('order_items')
 @Check('order_items_quantity_check', 'quantity > 0')
-@Check('order_items_unit_price_check', 'unit_price >= 0')
+@Check('order_items_unit_price_cents_check', 'unit_price_cents >= 0')
 // The FK index from the HW#12 review: the primary key covers order_id as its
 // left column, but product_id needs its own for DELETE on products.
 @Index('order_items_product_id_idx', ['productId'])
@@ -30,8 +30,8 @@ export class OrderItemEntity {
   quantity: number;
 
   // Price and name are snapshotted on the line, so old orders keep what was paid.
-  @Column('numeric', { name: 'unit_price', precision: 12, scale: 2 })
-  unitPrice: string;
+  @Column('bigint', { name: 'unit_price_cents' })
+  unitPriceCents: string;
 
   @Column('text', { name: 'product_name' })
   productName: string;

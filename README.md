@@ -40,7 +40,7 @@ The HW#12 schema as entities in [src/entities/](src/entities/), created by the m
 
 All of them read `dist/`, so run `npm run build` first.
 
-**Money is `numeric(12,2)`, not integer minor units.** The brief asks for integer kopecks; this project deliberately keeps `numeric(12,2)` (`price`, `total`, `unit_price`). Both are exact — neither is a float — but `numeric` keeps the scale in the column type, where integer cents keep it only in a `_cents` naming convention every reader has to know. It was chosen in the HW#12 review and is recorded as [ARCHITECTURE.md](ARCHITECTURE.md) decision 6. In code, `pg` returns `numeric` as a string, so nothing is lost on the way in; arithmetic is done in integer cents (see `src/seed.ts`), never on JS floats.
+**Money is integer minor units** — `price_cents`, `total_cents`, `unit_price_cents` as `bigint` cents (`349900` = 3499.00 UAH), as the brief asks. No float anywhere; arithmetic is integer addition and multiplication. `pg` returns `bigint` as a string, so nothing is lost on the way into JS. The `Init` migration created these columns as `numeric(12,2)`; the `MoneyToMinorUnits` migration converts them in place — see [ARCHITECTURE.md](ARCHITECTURE.md) decision 6.
 
 **`onDelete` choices:**
 
@@ -50,7 +50,14 @@ All of them read `dist/`, so run `npm run build` first.
 | `order_items.product_id → products` | `RESTRICT` | a sold product must not vanish from order history; products are soft-deleted instead (`deleted_at`) |
 | `orders.user_id → users` | `RESTRICT` | orders are financial records and outlive any cleanup of users |
 
-**Hand-written parts of the migration:** `products_lower_name_idx` (an index on `lower(name)`) and the `CREATE STATISTICS` for it, which TypeORM can't describe, and `CREATE TABLE IF NOT EXISTS typeorm_metadata`, which the generator relies on for `search_vector` but doesn't emit itself.
+**Migrations:**
+
+| Migration | What it does |
+|---|---|
+| `Init` | generated: every table, constraint and index. Hand-written inside it: `products_lower_name_idx` (an index on `lower(name)`) and its `CREATE STATISTICS`, which TypeORM can't describe, and `CREATE TABLE IF NOT EXISTS typeorm_metadata`, which the generator relies on for `search_vector` but doesn't emit itself |
+| `MoneyToMinorUnits` | hand-written: renames `price`/`total`/`unit_price` to `*_cents` and converts them from `numeric(12,2)` to `bigint` cents in place (`round(x * 100)`). The generator sees a rename as `DROP` + `ADD`, which would lose every price. `down()` converts back exactly |
+
+`Init` is never edited once it has run anywhere; a schema change is a new migration.
 
 ## Run
 
@@ -129,42 +136,43 @@ Connect (the password is the dev-only bootstrap password from [docker-compose.ym
 PGPASSWORD=admin-bootstrap-only psql -h localhost -p 21110 -U admin -d shop
 ```
 
-Full sequence to reproduce the numbers in [db/OPTIMIZATIONS.md](db/OPTIMIZATIONS.md) — schema, seed, plans before, indexes, plans after:
+**The schema has one source: the migrations in [src/migrations/](src/migrations/).** Tables, constraints, every index and the statistics object come from `npm run migrate`; `db/` only holds the HW#12 benchmark — a bulk dataset, the four queries and their recorded plans.
+
+Sequence to reproduce the plans in [db/OPTIMIZATIONS.md](db/OPTIMIZATIONS.md) — schema, bulk seed, plans without the query indexes, plans with them:
 
 ```bash
 export PGHOST=localhost PGPORT=21110 PGUSER=admin PGDATABASE=shop PGPASSWORD=admin-bootstrap-only
 
 docker compose down -v && docker compose up -d --wait
-psql -v ON_ERROR_STOP=1 -f db/schema.sql
+npm run build && npm run migrate
 psql -v ON_ERROR_STOP=1 -f db/seed.sql
 
+# before: the four query indexes and the statistics object dropped inside a
+# transaction that is rolled back, so the schema is untouched afterwards
 for q in 1 2 3 4; do
   echo "=== q$q BEFORE ==="
-  psql -c "EXPLAIN (ANALYZE, BUFFERS) $(cat db/queries/q$q.sql)"
+  psql -q <<SQL
+BEGIN;
+DROP INDEX orders_user_created_idx, orders_new_created_idx, products_lower_name_idx, products_search_vector_idx;
+DROP STATISTICS products_lower_name_stat;
+EXPLAIN (ANALYZE, BUFFERS) $(cat db/queries/q$q.sql);
+ROLLBACK;
+SQL
 done > db/before.txt
-
-psql -v ON_ERROR_STOP=1 -f db/indexes.sql
 
 for q in 1 2 3 4; do
   echo "=== q$q AFTER ==="
   psql -c "EXPLAIN (ANALYZE, BUFFERS) $(cat db/queries/q$q.sql)"
 done > db/after.txt
-
-echo "=== q4 AFTER (warm) ===" >> db/after.txt
-psql -c "EXPLAIN (ANALYZE, BUFFERS) $(cat db/queries/q4.sql)" >> db/after.txt
 ```
 
-`docker compose down -v` deletes the database volume, so every run starts from an empty database. User ids, quantities and order dates in the seed are random, so row counts for q1 and q2 differ slightly between runs; product names, prices and the search terms' match rates do not.
+`docker compose down -v` deletes the database volume, so every run starts from an empty database. User ids, quantities and order dates in the seed are random, so row counts for q1 and q2 differ slightly between runs; product names, prices and the search terms' match rates do not. The committed `before.txt` / `after.txt` are the HW#12 measurements, taken when the schema still came from SQL files and money was `numeric`.
 
 | File | Purpose |
 |---|---|
-| [db/schema.sql](db/schema.sql) | `users`, `products` (with a stored `tsvector`), `orders`, `order_items` |
-| [db/seed.sql](db/seed.sql) | 1,000 users, 100,000 products, 100,000 orders, 200,000 order lines; ends with `VACUUM (ANALYZE)` |
+| [db/seed.sql](db/seed.sql) | 1,000 users, 100,000 products, 100,000 orders, 200,000 order lines on the migrated schema; ends with `VACUUM (ANALYZE)` |
 | [db/queries/](db/queries/) | `q1`–`q4`, one statement per file, no semicolon, so each works inside `$(cat …)` |
-| [db/indexes.sql](db/indexes.sql) | one index per query: composite, partial, expression, GIN |
 | [db/OPTIMIZATIONS.md](db/OPTIMIZATIONS.md) | before/after plans, index sizes, the Ukrainian morphology limitation |
-
-Money is stored as `numeric(12,2)`, not as integer minor units: both are exact, and `numeric` keeps the scale in the column type instead of a `_cents` naming convention. This departs from the brief on purpose; see [ARCHITECTURE.md](ARCHITECTURE.md) decision 6.
 
 ## N+1
 
@@ -189,7 +197,9 @@ The orders are picked by id before counting, not with `take`: `take` together wi
 
 The report uses `.withDeleted()`: revenue is history, and a soft-deleted product still had its sales. Without it, the query builder adds `deleted_at IS NULL` just as `find()` does, and past revenue would change the day a product is discontinued.
 
-⚠️ `.withDeleted()` must come **before** the joins. Each `innerJoin()` writes the `deleted_at IS NULL` condition into its `ON` clause when it's called, so a later `.withDeleted()` leaves the joined products filtered. Checked by soft-deleting a product: with the call after the joins it vanished from the report (total 2102160.00 → 1310184.00); before the joins it stays.
+⚠️ `.withDeleted()` must come **before** the joins. Each `innerJoin()` writes the `deleted_at IS NULL` condition into its `ON` clause when it's called, so a later `.withDeleted()` leaves the joined products filtered. Checked by soft-deleting a product: with the call after the joins it vanished from the report (total 2102160.00 → 1310184.00 UAH, measured before the switch to cents); before the joins it stays.
+
+Revenue comes back as `revenue_cents`, in cents.
 
 ## Configuration
 
@@ -295,7 +305,7 @@ The multi-stage [Dockerfile](Dockerfile) only copies `dist/`, `package*.json`, `
 | `src/db/` | `DbModule`/`DbService`/`DbController` — pg pool factory, `/db` health query |
 | `src/health-check/` | dependency-free `/health` module (`{ uptimeSec }`) |
 | `src/entities/` | TypeORM entities for the HW#12 schema; `index.ts` exports them and the list the DataSource registers |
-| `src/migrations/` | generated migrations, with the hand-written parts marked |
+| `src/migrations/` | the only schema source: `Init` (generated, hand-written parts marked) and `MoneyToMinorUnits` (hand-written) |
 | `src/data-source.ts` | DataSource for the CLI and DB scripts: `synchronize: false`, URL from `MIGRATIONS_DB_URL` |
 | `src/seed.ts` | deterministic, idempotent seed |
 | `src/demo-nplus1.ts`, `src/common/query-count-logger.ts` | N+1 demo and the logger that counts its queries |

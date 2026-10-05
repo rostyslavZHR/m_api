@@ -20,7 +20,7 @@ const statusList = ORDER_STATUSES.map((status) => `'${status}'`).join(', ');
 
 @Entity('orders')
 @Check('orders_status_check', `status IN (${statusList})`)
-@Check('orders_total_check', 'total >= 0')
+@Check('orders_total_cents_check', 'total_cents >= 0')
 // Property names, not column names: TypeORM resolves user to user_id.
 @Index('orders_user_created_idx', ['user', 'createdAt'])
 @Index('orders_new_created_idx', ['createdAt'], { where: `status = 'new'` })
@@ -36,8 +36,9 @@ export class OrderEntity {
   status: OrderStatus;
 
   // Stored, not summed on read: it's a fact about the transaction (HW#12 decision).
-  @Column('numeric', { precision: 12, scale: 2 })
-  total: string;
+  // Integer minor units, like every money column.
+  @Column('bigint', { name: 'total_cents' })
+  totalCents: string;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;

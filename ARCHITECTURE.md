@@ -59,9 +59,9 @@ and why it's an explicit entity rather than a `@ManyToMany` (decision 27).
 
 | # | Decision | Reasoning |
 |---|---|---|
-| 6 | Money as **`numeric(12,2)`** (`price`, `total`, `unit_price`) | exact decimal, so no floating-point rounding, and the scale lives in the type rather than in a `_cents` suffix every reader has to know about. Avoids the `money` type, whose precision depends on a server locale setting. Deliberately departs from the brief's "integer in minor units": both are exact, and `numeric` was chosen in the HW#12 review. In JS, `pg` returns it as a string, so no precision is lost; arithmetic needs a decimal library or integer conversion, not `Number` |
-| ~~6a~~ | ~~Money as integer cents (`bigint`)~~ | **superseded by 6.** Exact, but the scale was encoded only in column names |
-| 7 | **`order_items` stores `unit_price` at purchase time** | an order is a record of what happened. Computing the total from today's prices would silently rewrite the value of every past order when a price changes |
+| 6 | Money as **integer minor units** — `bigint` cents (`price_cents`, `total_cents`, `unit_price_cents`) | what the brief requires. Exact, with no floating-point rounding, and arithmetic is plain integer addition and multiplication. Avoids the `money` type, whose precision depends on a server locale setting. `pg` returns `bigint` as a string, so nothing is lost in JS. The scale lives in the `_cents` suffix, so the suffix is mandatory on every money column |
+| ~~6a~~ | ~~Money as `numeric(12,2)`~~ | **superseded by 6.** Chosen in the HW#12 review (exact, scale in the type), but against the brief's integer requirement. Converted in place by the `MoneyToMinorUnits` migration |
+| 7 | **`order_items` stores `unit_price_cents` at purchase time** | an order is a record of what happened. Computing the total from today's prices would silently rewrite the value of every past order when a price changes |
 | 8 | `order_items` also stores **`product_name`** at purchase time | the line is then self-contained: an order stays fully readable regardless of what happens to the product row afterwards |
 | 9 | **Order total stored on the order**, not summed on read | the total is a fact about the transaction, not a derived value — it can include discounts, shipping and rounding that no sum of lines reproduces. Also avoids an aggregate join on every order list. Guarded by order lines being immutable after creation |
 | 10 | **Soft delete for products** (`deleted_at`) | products are discontinued, not erased; old orders and revenue reporting must still resolve them. Cost: every catalogue query needs `WHERE deleted_at IS NULL`, mitigated by a partial index on the live rows. With TypeORM the filter is automatic (`@DeleteDateColumn`); reports turn it off on purpose (decision 26) |
@@ -93,6 +93,7 @@ and why it's an explicit entity rather than a `@ManyToMany` (decision 27).
 | 26 | **Reports include soft-deleted products** (`.withDeleted()`) | revenue is history: a discontinued product still had its sales, and dropping it would change past totals the day it's discontinued. The call must come before the joins, or the joined products stay filtered |
 | 27 | `order_items` as an **explicit entity**, not `@ManyToMany` | the link carries data (quantity, price and name at purchase), which a `@ManyToMany` junction table can't hold. Composite primary key `(order_id, product_id)` |
 | 28 | Migration and script credentials from the **secret store**, through `scripts/with-secrets.sh` | `src/data-source.ts` has no host or password, only `MIGRATIONS_DB_URL` from the environment. Every DB script runs through the wrapper, so the store is the default path. `SKIP_VAULT=1` is the CI path, where the runner supplies the environment. The CLI connects as the schema owner, since `app_user` can't run DDL |
+| 29 | **The migrations are the only schema source** | `db/schema.sql` and `db/indexes.sql` described the same schema a second time and had already drifted (foreign keys without `ON DELETE` there, `RESTRICT` in the migration). They're removed; `db/` keeps only the HW#12 benchmark (bulk seed, queries, recorded plans), which runs on the migrated schema |
 
 ## Queries the schema must serve
 
@@ -131,3 +132,4 @@ and what its indexes exist for:
 | Data layer design | Decisions 7–15, 17, 18 — price and name snapshots, stored total, soft delete, status modelling, no sellers, real `users` table, type choices |
 | HW#12 review | Decision 6 changed: money is `numeric(12,2)`, superseding integer cents (6a) |
 | TypeORM data layer | Decisions 22–28 — ORM, migrations instead of `synchronize`, `onDelete` strategy, repository vs query builder, soft-deleted rows in reports, explicit join entity, credentials from the store. Decision 2 corrected: it was recorded as done, but the code still validates against the hand-written spec, so it's marked as planned and 2a as current |
+| HW#13 review | Decision 6 reversed: money is integer cents (`bigint`), as the brief requires; `numeric(12,2)` becomes 6a, converted by the `MoneyToMinorUnits` migration. Decision 29: the migrations are the only schema source; `db/schema.sql` and `db/indexes.sql` removed |

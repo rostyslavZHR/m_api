@@ -4,7 +4,7 @@ import { Check, Column, DeleteDateColumn, Entity, Index, PrimaryGeneratedColumn 
 // describe an index on an expression, so they live in hand-written migration
 // SQL. TypeORM doesn't see them either, so they never show up in a diff.
 @Entity('products')
-@Check('products_price_check', 'price >= 0')
+@Check('products_price_cents_check', 'price_cents >= 0')
 export class ProductEntity {
   @PrimaryGeneratedColumn('identity', { type: 'bigint', generatedIdentity: 'ALWAYS' })
   id: string; // bigint → string in pg
@@ -15,9 +15,10 @@ export class ProductEntity {
   @Column('text')
   description: string;
 
-  // pg returns NUMERIC as a string, so no precision is lost in JS.
-  @Column('numeric', { precision: 12, scale: 2 })
-  price: string;
+  // Integer minor units (cents): 349900 = 3499.00. pg returns bigint as a
+  // string, so no precision is lost in JS.
+  @Column('bigint', { name: 'price_cents' })
+  priceCents: string;
 
   @Column('boolean', { name: 'in_stock', default: false })
   inStock: boolean;
