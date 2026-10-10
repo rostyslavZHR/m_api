@@ -5,6 +5,17 @@ import { UserEntity } from './entities/index.js';
 import { RETRY_START_BALANCE_CENTS, RETRY_USER_EMAIL } from './seed-fixtures.js';
 
 // Forces a 40001 and shows the retry wrapper recovering from it.
+// What it shows: two read-modify-writes on one balance end exactly right at
+// REPEATABLE READ (one 40001, retried); DEMO_COMPARE=1 shows the same pair at
+// READ COMMITTED silently losing the deposit.
+//
+// What makes it hold, by KB question (dev-notes, postgres.md):
+//   #93 — the lost update itself: read into JS, compute, write an absolute value.
+//   #92 — REPEATABLE READ's snapshot is taken at the first statement; a write to a
+//         row changed after it is refused instead of overwriting.
+//   #94 — that refusal is 40001, serialization_failure.
+//   #95 — the wrapper retries only 40001/40P01, the whole transaction (reads
+//         included), bounded, with jitter; the retry reads A's result.
 //
 // ⚠️ DELIBERATELY WRONG PATTERN — do not "fix" into an atomic update. Both
 // transactions read the balance into JavaScript, compute, and write back an

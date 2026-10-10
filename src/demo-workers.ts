@@ -3,10 +3,20 @@ import { dataSource } from './data-source.js';
 import { JobEntity } from './entities/index.js';
 import { runWorker } from './workers/job-worker.js';
 
-// A pool of workers drains the job queue with SELECT … FOR UPDATE SKIP LOCKED.
-// No job may be processed twice or left behind, and the pool must beat doing
-// the jobs one by one. DEMO_COMPARE=1 also times the same batch without SKIP
-// LOCKED, which is correct but no faster than a single worker.
+// 4 workers drain the job queue at once.
+// What it shows: no job is processed twice or left behind, and the pool beats
+// doing the jobs one by one. DEMO_COMPARE=1 runs the same batch without SKIP
+// LOCKED: still correct, but serial — the workers queue on one row.
+//
+// What makes it hold, by KB question (dev-notes, postgres.md):
+//   #97 — SELECT … FOR UPDATE SKIP LOCKED LIMIT 1: each worker gets a different
+//         free job without waiting; "none free now" isn't "queue empty", so it
+//         re-asks before stopping. At-least-once: a crash before COMMIT redoes the job.
+//   #93 — FOR UPDATE alone already prevents double processing; SKIP LOCKED adds
+//         the parallelism (the contrast run proves both).
+//   #91 — the worker holds its transaction during the job: a crash rolls back,
+//         the lock vanishes, the job is new again. done + result commit together.
+//   #90 — getOne() adds no LIMIT; without .limit(1) the lock takes the whole queue.
 
 const WORKER_COUNT = 4;
 const MIN_BATCH = 20;

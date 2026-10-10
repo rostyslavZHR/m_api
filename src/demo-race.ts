@@ -6,8 +6,21 @@ import { JobEntity, OrderEntity, OrderItemEntity, ProductEntity, UserEntity } fr
 import { BROKE_USER_EMAIL, RACE_BUYER_EMAIL, RACE_PRODUCT, USER_BALANCE_CENTS } from './seed-fixtures.js';
 
 // 50 checkouts of one unit each, fired at once at a product with 10 in stock.
-// Exactly 10 must succeed, stock must end at 0 and never go negative, and
-// nothing else may change. Also the first real run of checkout() itself.
+// What it shows: under concurrency there's no oversell — exactly 10 succeed,
+// stock ends at 0 and never goes negative — and no half-done work: a failed
+// checkout leaves no order and gets its stock back; every success leaves one
+// order, one line, one job and one exact debit.
+//
+// What makes it hold, by KB question (dev-notes, postgres.md):
+//   #93 — the guarded atomic UPDATE … WHERE stock >= n RETURNING: the check and
+//         the change are one statement, and 0 affected rows is the guard refusing.
+//   #92 — at READ COMMITTED a writer that waited for the row lock re-checks its
+//         WHERE against the committed row, so the 11th buyer finds stock 0.
+//   #91 — all four steps in one transaction; a throw rolls everything back (the
+//         sanity check proves it with the broke user).
+//   #96 — one lock order, product before user, so the 50 can't deadlock.
+//   #95 — the retry wrapper is in the path, and `retries: 0` shows correct code
+//         never needed it; demo-retry.ts is where it's provoked.
 
 const ATTEMPTS = 50;
 

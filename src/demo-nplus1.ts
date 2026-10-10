@@ -5,7 +5,14 @@ import { OrderEntity, OrderItemEntity } from './entities/index.js';
 
 // Loads the same graph — order → items → product, two levels of relations —
 // with four strategies, at two collection sizes, and counts the SQL each sends.
-// The fixes must stay constant while the naive version grows with the size.
+// What it shows: the naive loop sends 1 + N queries and grows with the
+// collection; every fix stays constant (1, 1 and 4) and returns the same data.
+//
+// What makes it hold, by KB question (dev-notes, postgres.md):
+//   #89 — N+1: one query for the list, then one per item; fixed by loading the
+//         relations up front — a JOIN (relations, leftJoinAndSelect) or one
+//         batched query per level (relationLoadStrategy: 'query').
+//   #88 — the relations being loaded (@OneToMany items, @ManyToOne product).
 
 const COLLECTION_SIZES = [10, 50];
 // The SQL is printed at the first size only: enough to see the N+1 in the log.
