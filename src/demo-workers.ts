@@ -1,5 +1,5 @@
 import { In, MoreThan } from 'typeorm';
-import { dataSource } from './data-source.js';
+import { runtimeDataSource as dataSource } from './runtime-data-source.js';
 import { JobEntity } from './entities/index.js';
 import { runWorker } from './workers/job-worker.js';
 

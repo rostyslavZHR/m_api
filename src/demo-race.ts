@@ -1,7 +1,7 @@
 import { LessThan } from 'typeorm';
 import { InsufficientFundsError, OutOfStockError } from './checkout/checkout.errors.js';
 import { checkout } from './checkout/checkout.js';
-import { dataSource } from './data-source.js';
+import { runtimeDataSource as dataSource } from './runtime-data-source.js';
 import { JobEntity, OrderEntity, OrderItemEntity, ProductEntity, UserEntity } from './entities/index.js';
 import { BROKE_USER_EMAIL, RACE_BUYER_EMAIL, RACE_PRODUCT, USER_BALANCE_CENTS } from './seed-fixtures.js';
 

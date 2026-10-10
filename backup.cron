@@ -1,0 +1,28 @@
+# Nightly backup of the shop database: runs scripts/backup.sh at 03:00, which
+# writes backups/shop_<UTC timestamp>.dump plus its .check sidecar, and appends
+# the run's output to backups/backup.log.
+#
+# Timezone: cron uses the host's local timezone, so 03:00 is host time. The
+# dump's file name is in UTC regardless.
+#
+# Install. `crontab backup.cron` would REPLACE your whole crontab, so append:
+#   (crontab -l 2>/dev/null; cat backup.cron) | crontab -
+# On Linux you can instead copy it to /etc/cron.d/m_api-backup; files there need
+# a user field before the command (e.g. `0 3 * * * deploy cd …`).
+# Adjust /opt/m_api below to the repo's absolute path on install.
+#
+# Secrets: backup.sh needs none today, only DB_URL (config, not in the vault).
+# It still runs through with-secrets.sh, because the S3 upload (#26) will need
+# keys from the vault. An unattended job can't do an interactive vault login, so
+# production needs a machine identity token for Infisical; that isn't set up yet.
+#
+# Keep % out of the command line: cron turns it into a newline. The date is
+# built inside backup.sh for that reason.
+
+# PATH and DB_URL are set on the command, not as NAME=value lines: appended to
+# an existing crontab, those lines would apply to every job below them too.
+# PATH: Docker Desktop for Mac installs docker in /usr/local/bin; most Linux in
+# /usr/bin. DB_URL: only the database name is used; backup.sh connects inside
+# the db container. mkdir comes first: the log redirect needs backups/ before
+# backup.sh gets to create it, and on a fresh install it doesn't exist yet.
+0 3 * * * cd /opt/m_api && mkdir -p backups && PATH=/usr/local/bin:/usr/bin:/bin DB_URL=postgres://app_user@localhost:21111/shop bash scripts/with-secrets.sh prod bash scripts/backup.sh >> backups/backup.log 2>&1

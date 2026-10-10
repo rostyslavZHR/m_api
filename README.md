@@ -10,8 +10,13 @@ The DB scripts normally load credentials from the local store through `scripts/w
 
 ```bash
 docker compose up -d --wait
-export MIGRATIONS_DB_URL=postgres://admin:admin-bootstrap-only@localhost:21110/shop
+
+export DB_URL=postgres://app_user@localhost:21111/shop
 export SKIP_VAULT=1
+export MIGRATIONS_DB_URL=postgres://admin:admin-bootstrap-only@localhost:21110/shop
+
+cp .env.example .env
+mkdir -p secrets && printf 'app-v1-password' > secrets/db_password
 
 npm ci && npx tsc --noEmit
 npm run build
@@ -20,6 +25,11 @@ npm run migrate:revert && npm run migrate
 npm run seed && npm run seed
 docker compose exec db psql -U admin -d shop -Atc \
   "SELECT (SELECT count(*) FROM users), (SELECT count(*) FROM products), (SELECT count(*) FROM orders), (SELECT count(*) FROM order_items)"
+
+bash scripts/with-secrets.sh dev bash scripts/backup.sh
+docker compose exec -T db pg_restore --list < "$(ls backups/shop_*.dump | tail -1)" | head
+bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
+
 npm run demo:nplus1
 npm run report
 npm run demo:race
@@ -27,7 +37,20 @@ npm run demo:workers
 npm run demo:retry
 ```
 
-The row counts are `11|11|60|120` after the first seed and after the second — 10 users plus the underfunded one, 10 products plus the race product. Each demo prints its checks and exits non-zero if any fails; each resets its own preconditions, so it can be rerun.
+Acceptance checks with this repo's values (dev-only passwords, committed in [init.sql](init.sql) and [pgbouncer/userlist.txt](pgbouncer/userlist.txt)):
+
+| Criterion | Command |
+|---|---|
+| `psql` through PgBouncer | `PGPASSWORD=app-v1-password psql -h 127.0.0.1 -p 21111 -U app_user -d shop -c 'SELECT 1'` |
+| `pool_mode` | `grep -E '^pool_mode' pgbouncer/pgbouncer.ini` → `pool_mode = transaction` |
+| `SHOW POOLS` | `PGPASSWORD=pgbouncer-admin-dev-only psql -h 127.0.0.1 -p 21111 -U pgbouncer_admin -d pgbouncer -c 'SHOW POOLS'` |
+| Backup file name has a date | `ls backups/` → `shop_<YYYYMMDD>T<HHMMSS>Z.dump` |
+| `pg_restore --list` | `docker compose exec -T db pg_restore --list < backups/shop_….dump` — the container's Postgres 16; a host `pg_restore` older than 16 rejects the archive |
+| Restore drill | `bash scripts/restore-drill.sh` → last line `MATCH` |
+| cron line | `grep -cE '^(@(reboot\|daily)\|([0-9*/,-]+[[:space:]]+){4}[0-9*/,-]+)[[:space:]]+.*backup' backup.cron` → `1` |
+| RTO / RPO | `grep -iE 'RTO\|RPO' RESTORE-DRILL.md` |
+
+The row counts are `11|11|60|120` after the first seed and after the second — 10 users plus the underfunded one, 10 products plus the race product. Each demo prints its checks and exits non-zero if any fails; each resets its own preconditions, so it can be rerun. `demo:race`, `demo:workers` and `demo:retry` connect like the app does — as `app_user`, through PgBouncer on 21111 (`DB_URL` from `.env`, password from `secrets/db_password`) — see [PgBouncer](#pgbouncer).
 
 Optional: `DEMO_COMPARE=1 npm run demo:workers` and `DEMO_COMPARE=1 npm run demo:retry` add the contrast runs — the same work without `SKIP LOCKED`, and under `READ COMMITTED` — see [Concurrency](#concurrency).
 
@@ -229,6 +252,84 @@ Checkout ([src/checkout/checkout.ts](src/checkout/checkout.ts)), the job workers
 - **The receipt job is inserted in the checkout transaction.** It commits with the order or not at all, and the receipt is sent later by a worker — so a retried checkout can't send two.
 - **A worker holds its transaction while it works.** If it crashes mid-job, the transaction rolls back, the row lock disappears, and the job is `new` again for another worker. The claim is `ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED` — the `LIMIT` matters, because TypeORM's `getOne()` doesn't add one.
 
+## Data layer ops
+
+How to start the database, why the app goes through PgBouncer in transaction mode, how backups are taken and checked, and how to recover from one.
+
+### How to start
+
+```bash
+docker compose up -d --wait
+```
+
+| Service | Host port | Who connects |
+|---|---|---|
+| `db` (Postgres 16) | 21110 | migrations, seed, reports, admin work (`MIGRATIONS_DB_URL`, as the schema owner) |
+| `pgbouncer` (PgBouncer 1.26) | 21111 | the app and the concurrency demos (`DB_URL`, as `app_user`) |
+
+`--wait` returns once both are healthy. PgBouncer's healthcheck runs a query through the pool, so it's healthy only when Postgres is reachable behind it.
+
+### PgBouncer
+
+The app's runtime connections go through PgBouncer ([pgbouncer/pgbouncer.ini](pgbouncer/pgbouncer.ini), port 21111) in **transaction mode**: a server connection is lent to a client for one transaction and then returned, so many app connections share a few Postgres connections (`default_pool_size = 10`). Passwords aren't copied into PgBouncer: it looks each login up in Postgres through `pgbouncer.get_auth()` ([init.sql](init.sql)), so `rotate.sh` needs no PgBouncer step. The function refuses superusers and returns nothing for a password past its `VALID UNTIL`.
+
+**What transaction mode breaks:** anything that lives on the server connection longer than one transaction, because the next transaction may run on a different connection, and the next client may inherit this one. That covers session `SET`, `LISTEN`, SQL-level `PREPARE`, session advisory locks, `WITH HOLD` cursors, and temp tables with `ON COMMIT PRESERVE ROWS` / `DELETE ROWS`.
+
+**Why this app is unaffected** (driver audit, query logging on): `dataSource.transaction('REPEATABLE READ', …)` sends `START TRANSACTION` then `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`, so the isolation level is scoped to that one transaction, and the next one is back to `read committed`. TypeORM sends no startup parameters (`options`, `statement_timeout`) and runs no session `SET` on connect. Nothing in `src/` uses `LISTEN`, `PREPARE`, advisory locks, cursors or temp tables. node-postgres only uses named prepared statements when a query is given a `name`, and nothing here names one; PgBouncer 1.26 would handle protocol-level ones anyway (`max_prepared_statements` defaults to 200).
+
+**Why migrations bypass it:** `MIGRATIONS_DB_URL` connects to Postgres directly (21110) as the schema owner. PgBouncer can't log in a superuser here, because `get_auth()` returns nothing for one, and DDL is admin work that doesn't need pooling. `app_user` only has `SELECT, INSERT, UPDATE, DELETE` on the tables and `USAGE` on sequences, via `ALTER DEFAULT PRIVILEGES` in `init.sql`, so every table a migration creates is covered automatically. The exception is TypeORM's own bookkeeping (`migrations`, `typeorm_metadata`): the `RuntimeReadOnlySchemaHistory` migration leaves `app_user` `SELECT` only there, so the runtime user can't tamper with schema history.
+
+`DB_URL` carries no password (the app reads it from `secrets/db_password`), so it's config in `.env`; the vault's `MIGRATIONS_DB_URL` deliberately stays direct to Postgres.
+
+**Where the app reaches it:** here, `localhost:21111` from the host. Another container on the compose network uses `pgbouncer:6432` (the container port, not the host mapping). In production, `DB_URL` points at PgBouncer's internal service address, never at Postgres.
+
+**Experiments** (`demo:workers` runs 20 jobs × 100 ms; pool size changed live via `SET default_pool_size = N` on the admin console and restored with `RELOAD`):
+
+| Setting                  | Demo           | Result                                       | `SHOW POOLS` during the run              |
+|--------------------------|----------------|----------------------------------------------|------------------------------------------|
+| `default_pool_size = 10` | `demo:workers` | 566 ms                                       | —                                        |
+| `default_pool_size = 2`  | `demo:workers` | 1079 ms                                      | `cl_active=2 cl_waiting=2 sv_active=2`   |
+| `default_pool_size = 1`  | `demo:retry`   | fails after 5 s: no `40001`, balance 105000  | `cl_active=1 cl_waiting=1 sv_active=1`   |
+
+- **Pool size 2:** only 2 transactions run at once and the other 2 workers queue in PgBouncer, so the time doubles: ≈ 20 × 100 ms / 2.
+- **Pool size 1:** B holds the only server connection inside its transaction while it waits for A, and A waits in PgBouncer's queue for that same connection. Postgres sees no lock conflict, so nothing detects the deadlock; B's own 5 s timeout ends it, and only A's deposit lands (105000 instead of 102000).
+- **Session advisory lock:** `pg_advisory_lock(42)`, then quit. The lock stays held by an idle server connection that no client owns. Concurrent `pg_try_advisory_lock(42)` calls return `t` on that connection (advisory locks are re-entrant, so unrelated clients "acquire" a held lock) and `f` on any other. Which answer a client gets depends on which server connection it lands on. Cleanup: `pg_terminate_backend(pid)` as admin.
+
+### Backup
+
+```bash
+export DB_URL=postgres://app_user@localhost:21111/shop
+SKIP_VAULT=1 bash scripts/with-secrets.sh dev bash scripts/backup.sh
+```
+
+[scripts/backup.sh](scripts/backup.sh) writes `backups/shop_<UTC timestamp>.dump` (for example `shop_20261010T221922Z.dump`), a `pg_dump -Fc` archive, and prints its path as the last line. Only the database name is read from `DB_URL` (or `DATABASE_URL`); the dump itself runs inside the `db` container as its superuser over the local socket, so the script holds no credentials. `DB_URL` must be exported: the script doesn't read `.env`, and the vault doesn't hold it. It runs from any directory, since it `cd`s to the repo root first.
+
+- **Fails instead of writing a bad backup:** it exits non-zero if `db` isn't reachable, if `orders` is missing or empty ("database is empty: run migrate and seed first"), or if `pg_dump` fails. The archive is written under a temporary name and only renamed once `pg_dump` succeeds; a failed run leaves nothing in `backups/`.
+- **Control values:** `<dump>.check` holds `count(*)|sum(total_cents)` of `orders`, read just before the dump. The restore drill compares the restored database against this file, not against the live one.
+- **Check an archive** with the container's Postgres 16 tools: `docker compose exec -T db pg_restore --list < backups/shop_….dump`. The host's `pg_restore` 14 rejects it (`unsupported version (1.15) in file header`): an archive can only be read by a `pg_restore` at least as new as the `pg_dump` that wrote it.
+- **The dump has no roles.** Roles are cluster-wide and `pg_dump` covers one database, but the dump's `OWNER TO admin` and its grants to `app_user` and `pgbouncer_auth` still name them. Restoring into a fresh Postgres needs those roles created first.
+- Dumps contain real data: `backups/` is in `.gitignore` and `.dockerignore`, and the files are created owner-only (`umask 077`).
+
+**Schedule:** [backup.cron](backup.cron) runs it nightly at 03:00 host time through `with-secrets.sh prod`, appending output to `backups/backup.log`. Install by appending, since `crontab backup.cron` replaces the whole crontab: `(crontab -l 2>/dev/null; cat backup.cron) | crontab -`, after changing `/opt/m_api` to the repo's path. The file's header covers `/etc/cron.d/` on Linux and the machine identity production needs for the vault.
+
+- **RPO:** up to 24 h of data lost with a nightly run, up to 48 h if one night's run fails silently.
+- **Retention:** nothing deletes old dumps yet; that belongs with S3 lifecycle rules (#26).
+- **Off-host copies:** none yet. A dump on the same machine doesn't survive losing the machine.
+
+**Restore drill:** `bash scripts/restore-drill.sh` restores the newest dump into a throwaway container and prints `MATCH` when its `orders` equal the dump's `.check`. See [RESTORE-DRILL.md](RESTORE-DRILL.md) for the last run and what a real recovery needs first.
+
+### How to recover
+
+The drill proves a dump restores; this is the procedure for bringing the real database back from one. It isn't scripted. Practise it on a copy, never on the dev volume.
+
+1. **Stop the app** and anything else that writes, so nothing lands in the old database or half-way through the restore.
+2. **Start a fresh Postgres** from the same image as `db`, reachable by PgBouncer. Here that means the compose network, for example `docker run -d --name shop-restored --network m_api_default -e POSTGRES_USER=admin -e POSTGRES_PASSWORD=… -e POSTGRES_DB=shop postgres:16-alpine`.
+3. **Create the roles** from [init.sql](init.sql)'s role section, with the real passwords from the vault: `CREATE ROLE app_user LOGIN PASSWORD …`, `GRANT CONNECT ON DATABASE shop TO app_user`, `CREATE ROLE pgbouncer_auth LOGIN PASSWORD …`. Only that section: the dump brings the `pgbouncer` schema, `get_auth()` and the default privileges itself, and running the rest of `init.sql` would conflict with it. `pgbouncer_auth`'s password must match `pgbouncer/userlist.txt`, or PgBouncer can't look up logins.
+4. **Restore the chosen dump:** `docker exec -i shop-restored pg_restore -U admin -d shop --no-owner --single-transaction < backups/shop_….dump`. Any error rolls the whole restore back.
+5. **Check the control values:** `SELECT count(*) || '|' || sum(total_cents) FROM orders` must equal the dump's `.check`.
+6. **Point PgBouncer at it:** in [pgbouncer/pgbouncer.ini](pgbouncer/pgbouncer.ini), change `[databases]` to `shop = host=shop-restored port=5432 dbname=shop`, then run `RELOAD` on the admin console. The app's `DB_URL` doesn't change.
+7. **Start the app** and check it: `GET /db` returns `app_user`, and `SHOW POOLS` shows the `shop` pool in use.
+
 ## Configuration
 
 Environment variables are validated on startup by [src/config/env.schema.ts](src/config/env.schema.ts) via a zod schema, wired into `ConfigModule.forRoot({ validate })` in [src/app.module.ts](src/app.module.ts). A missing or malformed variable makes the process exit immediately with a non-zero code and a message naming every broken variable — never a runtime failure on the first request.
@@ -236,7 +337,7 @@ Environment variables are validated on startup by [src/config/env.schema.ts](src
 | Variable | Source | Required | Description |
 |---|---|---|---|
 | `PORT` | `.env` (template: `.env.example`) | No (default `3000`) | Port the HTTP server listens on. |
-| `DB_URL` | `.env` (template: `.env.example`) | Yes | Postgres connection string (`postgres://user@host:port/database`). Any password segment is ignored — a password embedded in an env var can't be rotated without a restart, which defeats the point below, so the pool always gets its password from `secrets/db_password` instead. |
+| `DB_URL` | `.env` (template: `.env.example`) | Yes, for the app and `demo:race`, `demo:workers`, `demo:retry` | Postgres connection string (`postgres://user@host:port/database`), pointing at PgBouncer (`localhost:21111`), not Postgres — see [PgBouncer](#pgbouncer). Any password segment is ignored — a password embedded in an env var can't be rotated without a restart, which defeats the point below, so the pool always gets its password from `secrets/db_password` instead. |
 | DB password (not an env var) | `secrets/db_password` — gitignored secret file (HW#11), rotated by `rotate.sh` | Yes, to run the app against Postgres | Read fresh on every new connection, so the password rotates without a restart. See [Database password](#database-password). |
 | `MIGRATIONS_DB_URL` | `.secrets/infisical.env` — gitignored, loaded by `scripts/with-secrets.sh` | Yes, for `migrate*`, `seed`, `demo:nplus1`, `report` | Connection string for the TypeORM CLI and DB scripts, as the schema owner (migrations run DDL, which `app_user` can't). Not read by the app, so it isn't in `.env.example` — `check:env` would reject it. See [DB scripts and secrets](#db-scripts-and-secrets). |
 
@@ -333,8 +434,9 @@ The multi-stage [Dockerfile](Dockerfile) only copies `dist/`, `package*.json`, `
 | `src/db/` | `DbModule`/`DbService`/`DbController` — pg pool factory, `/db` health query |
 | `src/health-check/` | dependency-free `/health` module (`{ uptimeSec }`) |
 | `src/entities/` | TypeORM entities for the HW#12 schema; `index.ts` exports them and the list the DataSource registers |
-| `src/migrations/` | the only schema source: `Init` (generated, hand-written parts marked), `MoneyToMinorUnits` (hand-written), `StockBalanceJobs` (generated, simplified) |
+| `src/migrations/` | the only schema source: `Init` (generated, hand-written parts marked), `MoneyToMinorUnits` (hand-written), `StockBalanceJobs` (generated, simplified), `RuntimeReadOnlySchemaHistory` (hand-written) |
 | `src/data-source.ts` | DataSource for the CLI and DB scripts: `synchronize: false`, URL from `MIGRATIONS_DB_URL` |
+| `src/runtime-data-source.ts` | DataSource for the concurrency demos: `app_user` through PgBouncer, like the app |
 | `src/seed.ts` | deterministic, idempotent seed |
 | `src/demo-nplus1.ts`, `src/common/query-count-logger.ts` | N+1 demo and the logger that counts its queries |
 | `src/report.ts`, `src/reports/` | report runner and the query-builder report itself |
@@ -343,11 +445,15 @@ The multi-stage [Dockerfile](Dockerfile) only copies `dist/`, `package*.json`, `
 | `src/common/transaction-retry.ts` | `inTransactionWithRetry`: retries the whole transaction on `40001`/`40P01`, bounded, full jitter, `label` + `onRetry` |
 | `src/workers/` | the job worker: claim with `SKIP LOCKED`, work and complete in one transaction |
 | `src/demo-race.ts`, `src/demo-workers.ts`, `src/demo-retry.ts` | the three concurrency demos |
+| `scripts/backup.sh` | `pg_dump -Fc` of `shop` into `backups/`, with a `.check` sidecar, see [Backup](#backup) |
+| `scripts/restore-drill.sh`, `RESTORE-DRILL.md` | restores the newest dump into a throwaway container and checks it; the last run's record |
+| `backup.cron` | nightly 03:00 schedule for `scripts/backup.sh`, with install notes |
 | `scripts/with-secrets.sh` | loads `.secrets/infisical.env` and runs the command; `SKIP_VAULT=1` skips the store |
 | `.env.example` | env var contract, kept in sync with the schema via `npm run check:env` |
 | `scripts/check-env-example.js` | diffs `.env.example` against the schema in both directions |
 | `secrets/db_password` | gitignored password file, read fresh on every new DB connection |
-| `docker-compose.yml`, `init.sql` | local Postgres for development |
+| `docker-compose.yml`, `init.sql` | local Postgres and PgBouncer for development; roles, grants, `get_auth()` |
+| `pgbouncer/` | PgBouncer config (`pgbouncer.ini`) and the two logins it keeps itself (`userlist.txt`) |
 | `rotate.sh` | rotates the DB password with no service restart |
 | `package.json` | ESM (`"type": "module"`), `scripts.start` runs `nest build && node dist/main.js` |
-| `.gitignore`, `.dockerignore` | `.env`/`secrets` excluded from both git and the Docker build context |
+| `.gitignore`, `.dockerignore` | `.env`/`secrets`/`backups` excluded from both git and the Docker build context |

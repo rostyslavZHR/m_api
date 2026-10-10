@@ -1,0 +1,2 @@
+"pgbouncer_auth" "pgbouncer-auth-dev-only"
+"pgbouncer_admin" "pgbouncer-admin-dev-only"
