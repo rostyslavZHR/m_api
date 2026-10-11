@@ -8,15 +8,15 @@ SKIP_VAULT=1 bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
 
 ## Last run
 
-| | |
-|---|---|
-| Date | 2026-10-10T22:29:57Z |
-| Dump | `shop_20261010T222901Z.dump`, 23958 bytes |
-| Image | `postgres:16-alpine` |
-| Restore only | 230 ms |
-| End to end | 2271 ms (container start, readiness, roles, restore, compare) |
-| Control values | expected `140\|210296000`, restored `140\|210296000` |
-| Result | `MATCH` |
+| Field          | Value                                                         |
+|----------------|---------------------------------------------------------------|
+| Date           | 2026-10-10T22:29:57Z                                          |
+| Dump           | `shop_20261010T222901Z.dump`, 23958 bytes                     |
+| Image          | `postgres:16-alpine`                                          |
+| Restore only   | 230 ms                                                        |
+| End to end     | 2271 ms (container start, readiness, roles, restore, compare) |
+| Control values | expected `140\|210296000`, restored `140\|210296000`          |
+| Result         | `MATCH`                                                       |
 
 A second run straight after printed `MATCH` again (restore 207 ms, end to end 2115 ms). Afterwards no container carried the `m_api.drill=1` label, the volume list was identical to before, and the dev database's `orders` still read `140|210296000`.
 
@@ -51,10 +51,10 @@ The drill creates both roles as `NOLOGIN` before restoring, so the grants restor
 
 Each exited 1, printed no `MATCH`, and left no container behind.
 
-| Case | Result |
-|---|---|
-| Wrong control value (`.check` edited) | `MISMATCH`, both values printed |
-| Dump without `.check` | `no control values for this dump (….check is missing)` |
-| Damaged dump (first 5000 bytes) | `pg_restore: error: could not read from input file: end of file`, then `pg_restore failed …: nothing compared` |
-| No dumps | `no dumps in backups/: run backup.sh first` |
-| Leftover container from a killed run | swept at the start of the next run, which then printed `MATCH` |
+| Case                                  | Result                                                                                                         |
+|---------------------------------------|----------------------------------------------------------------------------------------------------------------|
+| Wrong control value (`.check` edited) | `MISMATCH`, both values printed                                                                                |
+| Dump without `.check`                 | `no control values for this dump (….check is missing)`                                                         |
+| Damaged dump (first 5000 bytes)       | `pg_restore: error: could not read from input file: end of file`, then `pg_restore failed …: nothing compared` |
+| No dumps                              | `no dumps in backups/: run backup.sh first`                                                                    |
+| Leftover container from a killed run  | swept at the start of the next run, which then printed `MATCH`                                                 |

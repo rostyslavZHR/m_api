@@ -39,16 +39,18 @@ npm run demo:retry
 
 Acceptance checks with this repo's values (dev-only passwords, committed in [init.sql](init.sql) and [pgbouncer/userlist.txt](pgbouncer/userlist.txt)):
 
-| Criterion | Command |
-|---|---|
-| `psql` through PgBouncer | `PGPASSWORD=app-v1-password psql -h 127.0.0.1 -p 21111 -U app_user -d shop -c 'SELECT 1'` |
-| `pool_mode` | `grep -E '^pool_mode' pgbouncer/pgbouncer.ini` → `pool_mode = transaction` |
-| `SHOW POOLS` | `PGPASSWORD=pgbouncer-admin-dev-only psql -h 127.0.0.1 -p 21111 -U pgbouncer_admin -d pgbouncer -c 'SHOW POOLS'` |
-| Backup file name has a date | `ls backups/` → `shop_<YYYYMMDD>T<HHMMSS>Z.dump` |
-| `pg_restore --list` | `docker compose exec -T db pg_restore --list < backups/shop_….dump` — the container's Postgres 16; a host `pg_restore` older than 16 rejects the archive |
-| Restore drill | `bash scripts/restore-drill.sh` → last line `MATCH` |
-| cron line | `grep -cE '^(@(reboot\|daily)\|([0-9*/,-]+[[:space:]]+){4}[0-9*/,-]+)[[:space:]]+.*backup' backup.cron` → `1` |
-| RTO / RPO | `grep -iE 'RTO\|RPO' RESTORE-DRILL.md` |
+| Criterion                   | Command                                                                                                          |
+|-----------------------------|------------------------------------------------------------------------------------------------------------------|
+| `psql` through PgBouncer    | `PGPASSWORD=app-v1-password psql -h 127.0.0.1 -p 21111 -U app_user -d shop -c 'SELECT 1'`                        |
+| `pool_mode`                 | `grep -E '^pool_mode' pgbouncer/pgbouncer.ini` → `pool_mode = transaction`                                       |
+| `SHOW POOLS`                | `PGPASSWORD=pgbouncer-admin-dev-only psql -h 127.0.0.1 -p 21111 -U pgbouncer_admin -d pgbouncer -c 'SHOW POOLS'` |
+| Backup file name has a date | `ls backups/` → `shop_<YYYYMMDD>T<HHMMSS>Z.dump`                                                                 |
+| `pg_restore --list`         | `docker compose exec -T db pg_restore --list < backups/shop_….dump`                                              |
+| Restore drill               | `bash scripts/restore-drill.sh` → last line `MATCH`                                                              |
+| cron line                   | `grep -cE '^(@(reboot\|daily)\|([0-9*/,-]+[[:space:]]+){4}[0-9*/,-]+)[[:space:]]+.*backup' backup.cron` → `1`    |
+| RTO / RPO                   | `grep -iE 'RTO\|RPO' RESTORE-DRILL.md`                                                                           |
+
+`pg_restore --list` runs in the container on purpose: the archive is from Postgres 16, and a host `pg_restore` older than 16 rejects it (`unsupported version (1.15) in file header`).
 
 The row counts are `11|11|60|120` after the first seed and after the second — 10 users plus the underfunded one, 10 products plus the race product. Each demo prints its checks and exits non-zero if any fails; each resets its own preconditions, so it can be rerun. `demo:race`, `demo:workers` and `demo:retry` connect like the app does — as `app_user`, through PgBouncer on 21111 (`DB_URL` from `.env`, password from `secrets/db_password`) — see [PgBouncer](#pgbouncer).
 
@@ -88,6 +90,7 @@ All of them read `dist/`, so run `npm run build` first.
 | `Init` | generated: every table, constraint and index. Hand-written inside it: `products_lower_name_idx` (an index on `lower(name)`) and its `CREATE STATISTICS`, which TypeORM can't describe, and `CREATE TABLE IF NOT EXISTS typeorm_metadata`, which the generator relies on for `search_vector` but doesn't emit itself |
 | `MoneyToMinorUnits` | hand-written: renames `price`/`total`/`unit_price` to `*_cents` and converts them from `numeric(12,2)` to `bigint` cents in place (`round(x * 100)`). The generator sees a rename as `DROP` + `ADD`, which would lose every price. `down()` converts back exactly |
 | `StockBalanceJobs` | generated, then simplified: `in_stock` boolean → `stock integer` (replaced, not converted — the generator wrote it as rename + drop + add), `users.balance_cents`, the `jobs` table with `jobs_pending_idx … WHERE status = 'new'`, and `CHECK (stock >= 0)` / `CHECK (balance_cents >= 0)` |
+| `RuntimeReadOnlySchemaHistory` | hand-written: revokes `INSERT`/`UPDATE`/`DELETE` on `migrations` and `typeorm_metadata` from `app_user`, which keeps `SELECT`, so the runtime user can't rewrite schema history. `typeorm_metadata` is only touched if it exists |
 
 `Init` is never edited once it has run anywhere; a schema change is a new migration.
 
@@ -262,10 +265,10 @@ How to start the database, why the app goes through PgBouncer in transaction mod
 docker compose up -d --wait
 ```
 
-| Service | Host port | Who connects |
-|---|---|---|
-| `db` (Postgres 16) | 21110 | migrations, seed, reports, admin work (`MIGRATIONS_DB_URL`, as the schema owner) |
-| `pgbouncer` (PgBouncer 1.26) | 21111 | the app and the concurrency demos (`DB_URL`, as `app_user`) |
+| Service                      | Host port | Who connects                                                                     |
+|------------------------------|-----------|----------------------------------------------------------------------------------|
+| `db` (Postgres 16)           | 21110     | migrations, seed, reports, admin work (`MIGRATIONS_DB_URL`, as the schema owner) |
+| `pgbouncer` (PgBouncer 1.26) | 21111     | the app and the concurrency demos (`DB_URL`, as `app_user`)                      |
 
 `--wait` returns once both are healthy. PgBouncer's healthcheck runs a query through the pool, so it's healthy only when Postgres is reachable behind it.
 
@@ -285,11 +288,11 @@ The app's runtime connections go through PgBouncer ([pgbouncer/pgbouncer.ini](pg
 
 **Experiments** (`demo:workers` runs 20 jobs × 100 ms; pool size changed live via `SET default_pool_size = N` on the admin console and restored with `RELOAD`):
 
-| Setting                  | Demo           | Result                                       | `SHOW POOLS` during the run              |
-|--------------------------|----------------|----------------------------------------------|------------------------------------------|
-| `default_pool_size = 10` | `demo:workers` | 566 ms                                       | —                                        |
-| `default_pool_size = 2`  | `demo:workers` | 1079 ms                                      | `cl_active=2 cl_waiting=2 sv_active=2`   |
-| `default_pool_size = 1`  | `demo:retry`   | fails after 5 s: no `40001`, balance 105000  | `cl_active=1 cl_waiting=1 sv_active=1`   |
+| Setting                  | Demo           | Result                                      | `SHOW POOLS` during the run            |
+|--------------------------|----------------|---------------------------------------------|----------------------------------------|
+| `default_pool_size = 10` | `demo:workers` | 566 ms                                      | —                                      |
+| `default_pool_size = 2`  | `demo:workers` | 1079 ms                                     | `cl_active=2 cl_waiting=2 sv_active=2` |
+| `default_pool_size = 1`  | `demo:retry`   | fails after 5 s: no `40001`, balance 105000 | `cl_active=1 cl_waiting=1 sv_active=1` |
 
 - **Pool size 2:** only 2 transactions run at once and the other 2 workers queue in PgBouncer, so the time doubles: ≈ 20 × 100 ms / 2.
 - **Pool size 1:** B holds the only server connection inside its transaction while it waits for A, and A waits in PgBouncer's queue for that same connection. Postgres sees no lock conflict, so nothing detects the deadlock; B's own 5 s timeout ends it, and only A's deposit lands (105000 instead of 102000).
@@ -334,12 +337,17 @@ The drill proves a dump restores; this is the procedure for bringing the real da
 
 Environment variables are validated on startup by [src/config/env.schema.ts](src/config/env.schema.ts) via a zod schema, wired into `ConfigModule.forRoot({ validate })` in [src/app.module.ts](src/app.module.ts). A missing or malformed variable makes the process exit immediately with a non-zero code and a message naming every broken variable — never a runtime failure on the first request.
 
-| Variable | Source | Required | Description |
-|---|---|---|---|
-| `PORT` | `.env` (template: `.env.example`) | No (default `3000`) | Port the HTTP server listens on. |
-| `DB_URL` | `.env` (template: `.env.example`) | Yes, for the app and `demo:race`, `demo:workers`, `demo:retry` | Postgres connection string (`postgres://user@host:port/database`), pointing at PgBouncer (`localhost:21111`), not Postgres — see [PgBouncer](#pgbouncer). Any password segment is ignored — a password embedded in an env var can't be rotated without a restart, which defeats the point below, so the pool always gets its password from `secrets/db_password` instead. |
-| DB password (not an env var) | `secrets/db_password` — gitignored secret file (HW#11), rotated by `rotate.sh` | Yes, to run the app against Postgres | Read fresh on every new connection, so the password rotates without a restart. See [Database password](#database-password). |
-| `MIGRATIONS_DB_URL` | `.secrets/infisical.env` — gitignored, loaded by `scripts/with-secrets.sh` | Yes, for `migrate*`, `seed`, `demo:nplus1`, `report` | Connection string for the TypeORM CLI and DB scripts, as the schema owner (migrations run DDL, which `app_user` can't). Not read by the app, so it isn't in `.env.example` — `check:env` would reject it. See [DB scripts and secrets](#db-scripts-and-secrets). |
+| Variable                     | Source                   | Required for                                       |
+|------------------------------|--------------------------|----------------------------------------------------|
+| `PORT`                       | `.env`                   | — (default `3000`)                                 |
+| `DB_URL`                     | `.env`                   | the app, `demo:race`, `demo:workers`, `demo:retry` |
+| DB password (not an env var) | `secrets/db_password`    | the app and the same three demos                   |
+| `MIGRATIONS_DB_URL`          | `.secrets/infisical.env` | `migrate*`, `seed`, `demo:nplus1`, `report`        |
+
+- **`PORT`:** the port the HTTP server listens on. Template for `.env`: `.env.example`.
+- **`DB_URL`:** Postgres connection string (`postgres://user@host:port/database`), pointing at PgBouncer (`localhost:21111`), not Postgres — see [PgBouncer](#pgbouncer). Any password segment is ignored — a password embedded in an env var can't be rotated without a restart, which defeats the point below, so the pool always gets its password from `secrets/db_password` instead.
+- **DB password:** a gitignored secret file (HW#11), rotated by `rotate.sh`. Read fresh on every new connection, so the password rotates without a restart. See [Database password](#database-password).
+- **`MIGRATIONS_DB_URL`:** connection string for the TypeORM CLI and DB scripts, as the schema owner (migrations run DDL, which `app_user` can't). Loaded by `scripts/with-secrets.sh` from the gitignored store. Not read by the app, so it isn't in `.env.example` — `check:env` would reject it. See [DB scripts and secrets](#db-scripts-and-secrets).
 
 Copy [.env.example](.env.example) to `.env` and adjust as needed:
 
