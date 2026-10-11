@@ -27,3 +27,6 @@ spec.json
 
 # Documentation
 docs
+
+# Database dumps (scripts/backup.sh) hold real data
+backups

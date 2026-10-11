@@ -17,5 +17,30 @@ services:
       timeout: 2s
       retries: 15
 
+  # The app's runtime connection (DB_URL) goes through PgBouncer; migrations and
+  # admin work stay on db directly. The image never overwrites a mounted ini, so
+  # its environment variables (POOL_MODE etc.) would do nothing — the ini is it.
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.26.0-p0
+    ports:
+      - "21111:6432"                                       # container side = listen_port in the ini
+    volumes:
+      # The directory, not the two files: editors and sed -i replace a file with a
+      # new one, and a single-file bind mount keeps showing the container the old
+      # one. With the directory mounted, edit the ini, then RELOAD on the console.
+      - ./pgbouncer:/etc/pgbouncer:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      # A real query through the pool: it reaches Postgres, so it fails when db is
+      # down. pg_isready alone would only prove PgBouncer itself is listening.
+      # Right for compose --wait. In Kubernetes (#28) this check is the readiness
+      # probe; liveness checks PgBouncer alone, or a db outage restarts it for nothing.
+      test: ["CMD-SHELL", "PGPASSWORD=pgbouncer-auth-dev-only psql -h 127.0.0.1 -p 6432 -U pgbouncer_auth -d shop -tAc 'SELECT 1' | grep -q 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
 volumes:
   pgdata:

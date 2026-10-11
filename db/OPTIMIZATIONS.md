@@ -1,5 +1,11 @@
 # Optimizations — Marketplace API
 
+> Measured in HW#12, when the schema came from `db/schema.sql` and the query indexes
+> from `db/indexes.sql`, and money was `numeric(12,2)`. Since HW#13 the schema has one
+> source, the migrations in `src/migrations/`, which also create these indexes; money is
+> integer cents. The plans and numbers below are the recorded HW#12 results. The
+> README's *Database* section has the sequence that reproduces them on the migrated schema.
+
 ## Baseline: dataset and storage
 
 Seeded by `db/seed.sql`: 1,000 users, 100,000 products, 100,000 orders,
@@ -21,8 +27,8 @@ computed at query time. The GIN index built on it later adds to this.
 
 ## Before and after indexes
 
-Clean rebuild: `docker compose down -v`, `db/schema.sql`, `db/seed.sql`, plans captured, then
-`db/indexes.sql` (which ends with `ANALYZE`), plans captured again. Raw output is kept in
+Clean rebuild (HW#12): `docker compose down -v`, `db/schema.sql`, `db/seed.sql`, plans captured, then
+`db/indexes.sql` (which ended with `ANALYZE`), plans captured again — both files since replaced by the migrations. Raw output is kept in
 [`before.txt`](before.txt) and [`after.txt`](after.txt). q4's after-plan is the warm second run.
 
 ```sh
@@ -265,7 +271,7 @@ the partial predicate keeps discontinued products out of search results; it does
 Postgres doesn't index a foreign key's referencing column. `order_items` has two foreign keys:
 `order_id` is the left column of the primary key, so it's covered, but `product_id` had no index.
 Deleting a product then has to scan all 200,000 lines to check that none still reference it.
-`db/schema.sql` creates `order_items_product_id_idx` (4.5 MB) for this.
+The `Init` migration creates `order_items_product_id_idx` (4.5 MB) for this (in HW#12, `db/schema.sql` did).
 
 Measured by deleting a newly inserted product that no order line references, inside a rolled-back
 transaction:
