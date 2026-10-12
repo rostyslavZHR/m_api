@@ -1,17 +1,17 @@
-import { Inject, Injectable, OnModuleDestroy } from '@nestjs/common';
-import type { Pool } from 'pg';
-import { PG_POOL } from './db.provider.js';
+import { Injectable } from '@nestjs/common';
+import { DataSource } from 'typeorm';
+
+export interface ServerStatus {
+  current_user: string;
+  now: Date;
+}
 
 @Injectable()
-export class DbService implements OnModuleDestroy {
-  constructor(@Inject(PG_POOL) private readonly pool: Pool) {}
+export class DbService {
+  constructor(private readonly dataSource: DataSource) {}
 
-  async getServerStatus() {
-    const { rows } = await this.pool.query('SELECT current_user, now()');
-    return rows[0];
-  }
-
-  onModuleDestroy() {
-    return this.pool.end();
+  async getServerStatus(): Promise<ServerStatus> {
+    const [status] = await this.dataSource.query<ServerStatus[]>('SELECT current_user, now()');
+    return status;
   }
 }

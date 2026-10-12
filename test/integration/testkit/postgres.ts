@@ -4,26 +4,22 @@ import { DataSource } from 'typeorm';
 import { entities } from '../../../src/entities/index.js';
 import { createSchemaDataSource } from '../../../src/schema-data-source.js';
 
-// A throwaway copy of the compose db: same image, admin as the superuser (the
-// default privileges in init.sql are FOR ROLE admin), init.sql applied by the
-// image's entrypoint on first start, then the real migrations. Never the
-// compose db or PgBouncer.
 const IMAGE = 'postgres:16-alpine'; // keep in sync with db in docker-compose.yml
 const INIT_SQL = fileURLToPath(new URL('../../../../init.sql', import.meta.url));
-// The starting password init.sql gives app_user.
-const APP_USER_PASSWORD = 'app-v1-password';
+const APP_USER_PASSWORD = 'app-v1-password'; // set by init.sql
 
 export interface TestDatabase {
-  // Schema owner: migrations, seeding, TRUNCATE.
+  // Schema owner: migrations and reset() only.
   admin: DataSource;
-  // app_user, the role the app runs as: the code under test uses this one.
+  // app_user: everything under test, so missing grants fail the tests.
   app: DataSource;
   appUrl: string;
-  // Closes both pools, then stops the container. Call it in afterAll.
+  reset(): Promise<void>;
   stop(): Promise<void>;
 }
 
 export async function startTestDatabase(): Promise<TestDatabase> {
+  // admin must be the superuser: init.sql's default privileges are FOR ROLE admin.
   const container = await new PostgreSqlContainer(IMAGE)
     .withUsername('admin')
     .withPassword('admin-test-only')
@@ -50,5 +46,12 @@ export async function startTestDatabase(): Promise<TestDatabase> {
     throw error;
   }
 
-  return { admin, app, appUrl, stop };
+  // TRUNCATE rather than a per-test rollback: checkout commits its own
+  // transactions. Entity tables only, so the migrations table survives.
+  const tables = admin.entityMetadatas.map(({ tableName }) => `"${tableName}"`).join(', ');
+  const reset = async () => {
+    await admin.query(`TRUNCATE ${tables} RESTART IDENTITY CASCADE`);
+  };
+
+  return { admin, app, appUrl, reset, stop };
 }

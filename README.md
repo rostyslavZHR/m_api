@@ -333,6 +333,23 @@ The drill proves a dump restores; this is the procedure for bringing the real da
 6. **Point PgBouncer at it:** in [pgbouncer/pgbouncer.ini](pgbouncer/pgbouncer.ini), change `[databases]` to `shop = host=shop-restored port=5432 dbname=shop`, then run `RELOAD` on the admin console. The app's `DB_URL` doesn't change.
 7. **Start the app** and check it: `GET /db` returns `app_user`, and `SHOW POOLS` shows the `shop` pool in use.
 
+## Testing (Тестування)
+
+```bash
+npm run test:integration
+npm run test:e2e
+```
+
+Integration tests run against a throwaway Postgres container (Testcontainers): the same image as the compose `db`, `init.sql` applied first, then the real migrations. The code under test connects as `app_user`, so a missing grant fails a test; only setup runs as admin ([test/integration/testkit/](test/integration/testkit/)).
+
+Tests are isolated with `TRUNCATE … RESTART IDENTITY CASCADE` before each one, not a transaction rolled back after it. `checkout()` opens and commits its own transactions and takes row locks, and the E2E tests run the app on its own pool, so a per-test rollback can't contain either. It's the same split Django makes between `TestCase` and `TransactionTestCase`.
+
+The E2E tests ([test/e2e/](test/e2e/)) boot the real `AppModule`, with no provider overrides and the same `configureApp()` as `main.ts`, on the same kind of container. `DB_URL` is pointed at the container **before** `AppModule` is imported (a dynamic `import()` in `beforeAll`): `ConfigModule` reads the environment on first import, and a static import would pick up `.env`, which points at the dev database. `beforeAll` also checks the app's connection port and stops if it isn't the container's.
+
+## Known gaps
+
+- **Idempotency-Key replays are kept in memory:** per process, lost on restart, and two simultaneous requests with the same key can both create an order. A table with a unique key on the idempotency key is the durable version.
+
 ## Configuration
 
 Environment variables are validated on startup by [src/config/env.schema.ts](src/config/env.schema.ts) via a zod schema, wired into `ConfigModule.forRoot({ validate })` in [src/app.module.ts](src/app.module.ts). A missing or malformed variable makes the process exit immediately with a non-zero code and a message naming every broken variable — never a runtime failure on the first request.
@@ -383,7 +400,7 @@ npm run migrate:generate -- src/migrations/AddOrders
 
 ### Database password
 
-The Postgres password is never read from an environment variable. `DbService`'s connection pool ([src/db/db.provider.ts](src/db/db.provider.ts)) reads it from `secrets/db_password` on every new connection (via `pg.Pool`'s `password` option, which accepts an async function) — that file is gitignored and never copied into the Docker image.
+The Postgres password is never read from an environment variable. The app's TypeORM DataSource ([src/db/app-data-source.ts](src/db/app-data-source.ts)) reads it from `secrets/db_password` on every new connection (TypeORM's `password` option accepts an async function, which it hands to the `pg` pool underneath) — that file is gitignored and never copied into the Docker image.
 
 Local Postgres for development — one line to bring it up, one line to connect (both work on a clean clone, no setup beyond this):
 
@@ -439,7 +456,7 @@ The multi-stage [Dockerfile](Dockerfile) only copies `dist/`, `package*.json`, `
 | `src/products/`, `src/orders/` | one Nest module (controller + service) per resource, in-memory data |
 | `src/common/` | shared `problem+json` builder and the global exception filter |
 | `src/config/env.schema.ts` | zod schema for all env vars, fail-fast `validate()` |
-| `src/db/` | `DbModule`/`DbService`/`DbController` — pg pool factory, `/db` health query |
+| `src/db/` | `DbModule`/`DbService`/`DbController` — the app's DataSource (`app-data-source.ts`), `/db` health query |
 | `src/health-check/` | dependency-free `/health` module (`{ uptimeSec }`) |
 | `src/entities/` | TypeORM entities for the HW#12 schema; `index.ts` exports them and the list the DataSource registers |
 | `src/migrations/` | the only schema source: `Init` (generated, hand-written parts marked), `MoneyToMinorUnits` (hand-written), `StockBalanceJobs` (generated, simplified), `RuntimeReadOnlySchemaHistory` (hand-written) |

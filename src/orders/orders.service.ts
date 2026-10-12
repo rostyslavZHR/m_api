@@ -1,7 +1,18 @@
 import { isDeepStrictEqual } from 'node:util';
-import { BadRequestException, Injectable, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
-import { ProductsService } from '../products/products.service.js';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+  UnprocessableEntityException,
+} from '@nestjs/common';
+import { DataSource } from 'typeorm';
+import { checkout } from '../checkout/checkout.js';
+import { InsufficientFundsError, OutOfStockError } from '../checkout/checkout.errors.js';
+import type { OrderEntity, OrderStatus } from '../entities/index.js';
+import { OrdersRepository } from './orders.repository.js';
 
+// The OrderItem, Order and CreateOrder schemas in openapi/openapi.yaml.
 interface OrderItem {
   product_id: number;
   quantity: number;
@@ -11,138 +22,100 @@ export interface Order {
   id: number;
   items: OrderItem[];
   total_cents: number;
-  status: 'new' | 'paid' | 'shipped' | 'cancelled';
+  status: OrderStatus;
   created_at: string;
 }
 
-interface Cursor {
-  created_at: string;
-  id: number;
+export interface CreateOrder {
+  user_id: number;
+  items: OrderItem[];
 }
 
-const orders: Order[] = [
-  {
-    id: 1,
-    items: [{ product_id: 1, quantity: 1 }],
-    total_cents: 8999,
-    status: 'new',
-    created_at: '2026-09-15T09:00:00.000Z',
-  },
-  {
-    id: 2,
-    items: [{ product_id: 2, quantity: 2 }],
-    total_cents: 4998,
-    status: 'paid',
-    created_at: '2026-09-15T09:01:00.000Z',
-  },
-  {
-    id: 3,
-    items: [
-      { product_id: 3, quantity: 1 },
-      { product_id: 4, quantity: 1 },
-    ],
-    total_cents: 30998,
-    status: 'shipped',
-    created_at: '2026-09-15T09:02:00.000Z',
-  },
-  {
-    id: 4,
-    items: [{ product_id: 4, quantity: 3 }],
-    total_cents: 17997,
-    status: 'new',
-    created_at: '2026-09-15T09:03:00.000Z',
-  },
-  {
-    id: 5,
-    items: [{ product_id: 1, quantity: 2 }],
-    total_cents: 17998,
-    status: 'paid',
-    created_at: '2026-09-15T09:04:00.000Z',
-  },
-];
+// bigint columns arrive as strings; these values are far below 2^53.
+const toOrder = (entity: OrderEntity): Order => ({
+  id: Number(entity.id),
+  items: entity.items.map((item) => ({ product_id: Number(item.productId), quantity: item.quantity })),
+  total_cents: Number(entity.totalCents),
+  status: entity.status,
+  created_at: entity.createdAt.toISOString(),
+});
 
 @Injectable()
 export class OrdersService {
-  private readonly idempotencyKeys = new Map<string, { body: { items: OrderItem[] }; order: Order }>();
+  // Replays for Idempotency-Key. In memory, so per process and lost on restart;
+  // a table with a unique key is the durable version.
+  private readonly idempotencyKeys = new Map<string, { body: CreateOrder; order: Order }>();
 
-  constructor(private readonly productsService: ProductsService) {}
+  constructor(
+    private readonly dataSource: DataSource,
+    private readonly orders: OrdersRepository,
+  ) {}
 
-  findById(id: number): Order {
-    const order = orders.find((o) => o.id === id);
+  async getById(id: number): Promise<Order> {
+    const order = await this.orders.findById(String(id));
     if (!order) {
       throw new NotFoundException(`Order ${id} not found.`);
     }
-    return order;
+    return toOrder(order);
   }
 
-  list(limitParam: string | undefined, cursorParam: string | undefined): { items: Order[]; next_cursor: string | null } {
+  async list(limitParam: string | undefined, cursorParam: string | undefined) {
     const limit = limitParam !== undefined ? Number(limitParam) : 20;
+    const afterId = cursorParam !== undefined ? this.decodeCursor(cursorParam) : undefined;
 
-    const sorted = [...orders].sort((a, b) => {
-      if (a.created_at !== b.created_at) return a.created_at < b.created_at ? -1 : 1;
-      return a.id - b.id;
-    });
+    // One extra row tells whether another page exists.
+    const rows = await this.orders.list(limit + 1, afterId);
+    const page = rows.slice(0, limit);
+    const next_cursor = rows.length > limit ? this.encodeCursor(page[page.length - 1].id) : null;
 
-    let startIndex = 0;
-    if (cursorParam !== undefined) {
-      const decoded = this.decodeCursor(cursorParam);
-      startIndex = sorted.findIndex((order) => {
-        if (order.created_at !== decoded.created_at) return order.created_at > decoded.created_at;
-        return order.id > decoded.id;
-      });
-      if (startIndex === -1) startIndex = sorted.length;
-    }
-
-    const page = sorted.slice(startIndex, startIndex + limit);
-    const hasMore = startIndex + page.length < sorted.length;
-    const next_cursor = hasMore ? this.encodeCursor(page[page.length - 1]) : null;
-
-    return { items: page, next_cursor };
+    return { items: page.map(toOrder), next_cursor };
   }
 
-  create(idempotencyKey: string, body: { items: OrderItem[] }): Order {
-    const existing = this.idempotencyKeys.get(idempotencyKey);
-    if (existing) {
-      if (!isDeepStrictEqual(existing.body, body)) {
+  async create(idempotencyKey: string, body: CreateOrder): Promise<Order> {
+    const replay = this.idempotencyKeys.get(idempotencyKey);
+    if (replay) {
+      if (!isDeepStrictEqual(replay.body, body)) {
         throw new UnprocessableEntityException('This Idempotency-Key was already used with a different request body.');
       }
-      return existing.order;
+      return replay.order;
     }
 
-    let total_cents = 0;
-    for (const item of body.items) {
-      const product = this.productsService.find(item.product_id);
-      if (!product) {
-        throw new BadRequestException(`Product ${item.product_id} does not exist.`);
+    const productIds = body.items.map((item) => item.product_id);
+    if (new Set(productIds).size !== productIds.length) {
+      throw new BadRequestException('Each product can appear only once in an order.');
+    }
+
+    let created: OrderEntity;
+    try {
+      created = await checkout(this.dataSource, {
+        userId: String(body.user_id),
+        items: body.items.map((item) => ({ productId: String(item.product_id), quantity: item.quantity })),
+      });
+    } catch (error) {
+      if (error instanceof OutOfStockError || error instanceof InsufficientFundsError) {
+        throw new ConflictException(error.message);
       }
-      total_cents += product.price_cents * item.quantity;
+      throw error;
     }
 
-    const order: Order = {
-      id: orders.length ? Math.max(...orders.map((o) => o.id)) + 1 : 1,
-      items: body.items,
-      total_cents,
-      status: 'new',
-      created_at: new Date().toISOString(),
-    };
-
-    orders.push(order);
+    // Read back, so the response is what the database holds.
+    const order = await this.getById(Number(created.id));
     this.idempotencyKeys.set(idempotencyKey, { body, order });
     return order;
   }
 
-  private encodeCursor(order: Order): string {
-    return Buffer.from(JSON.stringify({ created_at: order.created_at, id: order.id })).toString('base64url');
+  private encodeCursor(id: string): string {
+    return Buffer.from(JSON.stringify({ id })).toString('base64url');
   }
 
-  private decodeCursor(cursor: string): Cursor {
+  private decodeCursor(cursor: string): string {
     try {
-      const json = Buffer.from(cursor, 'base64url').toString('utf8');
-      const decoded = JSON.parse(json);
-      if (typeof decoded !== 'object' || decoded === null || typeof decoded.created_at !== 'string' || typeof decoded.id !== 'number') {
+      const decoded: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+      const id = (decoded as { id?: unknown } | null)?.id;
+      if (typeof id !== 'string' || !/^\d+$/.test(id)) {
         throw new Error('invalid cursor shape');
       }
-      return decoded;
+      return id;
     } catch {
       throw new BadRequestException('The cursor query parameter is not a valid pagination token.');
     }

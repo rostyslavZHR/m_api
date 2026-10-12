@@ -1,5 +1,8 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import type { ProductEntity } from '../entities/index.js';
+import { ProductsRepository } from './products.repository.js';
 
+// The Product schema in openapi/openapi.yaml.
 export interface Product {
   id: number;
   title: string;
@@ -7,28 +10,32 @@ export interface Product {
   in_stock: boolean;
 }
 
-const products: Product[] = [
-  { id: 1, title: 'Mechanical Keyboard', price_cents: 8999, in_stock: true },
-  { id: 2, title: 'Wireless Mouse', price_cents: 2499, in_stock: true },
-  { id: 3, title: '27-inch Monitor', price_cents: 24999, in_stock: false },
-  { id: 4, title: 'USB-C Dock', price_cents: 5999, in_stock: true },
-];
+// bigint columns arrive as strings; these values are far below 2^53.
+const toProduct = (entity: ProductEntity): Product => ({
+  id: Number(entity.id),
+  title: entity.name,
+  price_cents: Number(entity.priceCents),
+  in_stock: entity.stock > 0,
+});
 
 @Injectable()
 export class ProductsService {
-  findAll(): Product[] {
-    return products;
+  constructor(private readonly products: ProductsRepository) {}
+
+  async findAll(): Promise<Product[]> {
+    return (await this.products.findAll()).map(toProduct);
   }
 
-  findById(id: number): Product {
-    const product = this.find(id);
+  async findById(id: number): Promise<Product | null> {
+    const entity = await this.products.findById(String(id));
+    return entity && toProduct(entity);
+  }
+
+  async getById(id: number): Promise<Product> {
+    const product = await this.findById(id);
     if (!product) {
       throw new NotFoundException(`Product ${id} not found.`);
     }
     return product;
-  }
-
-  find(id: number): Product | undefined {
-    return products.find((p) => p.id === id);
   }
 }
