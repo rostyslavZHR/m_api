@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { execSync } from 'node:child_process';
 import type { AddressInfo } from 'node:net';
 import pact from '@pact-foundation/pact';
 import type { NestExpressApplication } from '@nestjs/platform-express';
@@ -10,6 +11,28 @@ import { PACT_FILE, PROVIDER } from './pact.js';
 // consumer's pact. A plain script rather than a Jest test: there's nothing to
 // assert beyond the verifier's own result, which becomes the exit code.
 const { Verifier } = pact;
+
+const git = (args: string) => execSync(`git ${args}`, { encoding: 'utf8' }).trim();
+
+// With PACT_BROKER_URL set (vault, CI, or exported), pacts come from the broker
+// and the result is published under this version. Without it, the local file.
+const brokerUrl = process.env.PACT_BROKER_URL;
+const providerVersion = process.env.PROVIDER_VERSION ?? git('rev-parse --short HEAD');
+const source = brokerUrl
+  ? {
+      pactBrokerUrl: brokerUrl,
+      ...(process.env.PACT_BROKER_TOKEN ? { pactBrokerToken: process.env.PACT_BROKER_TOKEN } : {}),
+      // The brief publishes with a plain curl PUT, which carries no branch, so
+      // branch-based selectors would find nothing. Once publishing records a
+      // branch (CI does), use { mainBranch: true } and { deployedOrReleased: true }.
+      consumerVersionSelectors: [{ latest: true }],
+      publishVerificationResult: true,
+      providerVersion,
+      providerVersionBranch: process.env.PROVIDER_BRANCH ?? git('rev-parse --abbrev-ref HEAD'),
+    }
+  : { pactUrls: [PACT_FILE] };
+
+console.log(brokerUrl ? `Verifying from ${brokerUrl} as ${PROVIDER} version ${providerVersion}` : `Verifying ${PACT_FILE}`);
 
 const db = await startTestDatabase();
 let app: NestExpressApplication | undefined;
@@ -23,7 +46,7 @@ try {
   await new Verifier({
     provider: PROVIDER,
     providerBaseUrl: `http://127.0.0.1:${port}`,
-    pactUrls: [PACT_FILE],
+    ...source,
     // Each state starts from an empty database, so verification is repeatable
     // and a fixed id can't collide with the identity sequence.
     stateHandlers: {

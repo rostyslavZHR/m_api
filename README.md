@@ -265,10 +265,11 @@ How to start the database, why the app goes through PgBouncer in transaction mod
 docker compose up -d --wait
 ```
 
-| Service                      | Host port | Who connects                                                                     |
-|------------------------------|-----------|----------------------------------------------------------------------------------|
-| `db` (Postgres 16)           | 21110     | migrations, seed, reports, admin work (`MIGRATIONS_DB_URL`, as the schema owner) |
-| `pgbouncer` (PgBouncer 1.26) | 21111     | the app and the concurrency demos (`DB_URL`, as `app_user`)                      |
+| Service                                    | Host port | Who connects                                                                     |
+|--------------------------------------------|-----------|----------------------------------------------------------------------------------|
+| `db` (Postgres 16)                         | 21110     | migrations, seed, reports, admin work (`MIGRATIONS_DB_URL`, as the schema owner) |
+| `pgbouncer` (PgBouncer 1.26)               | 21111     | the app and the concurrency demos (`DB_URL`, as `app_user`)                      |
+| `pact-broker` (+ its own `pact-broker-db`) | 21112     | contract publishing and `can-i-deploy` (`PACT_BROKER_URL`); never the app's db   |
 
 `--wait` returns once both are healthy. PgBouncer's healthcheck runs a query through the pool, so it's healthy only when Postgres is reachable behind it.
 
@@ -351,6 +352,42 @@ The E2E tests ([test/e2e/](test/e2e/)) boot the real `AppModule`, with no provid
 **Contract (Pact).** An imaginary frontend, `web-app`, consumes `m-api` (the names are fixed: pact file, verifier, broker and can-i-deploy all use them). Its consumer test ([test/contract/](test/contract/)) drives a small `ProductsClient`, not raw `fetch`, and records two interactions on `GET /products/{id}`: `product 42 exists` → 200 with `id`, `title`, `price_cents`, `in_stock` (matchers, not exact values), and `product 999 does not exist` → 404 `application/problem+json`. `verify:provider` runs the real app (container, migrations, `configureApp()`, the same boot as E2E) against that file; each provider state starts from `reset()`, so verification is repeatable. `pacts/` is gitignored: `test:contract` (and CI) generates it, so a stale file can't pass for a current one.
 
 The spec and the contract are two separate nets. When the provider renamed `title` to `name`, the OpenAPI response validator caught it first: the app answered 500 (`/response must have required property 'title'`), and Pact reported `expected 200 but was 500` before comparing any body. When the consumer asked for a field the provider doesn't return (`currency`), the spec had nothing to say and Pact caught it: `Actual map is missing the following keys: currency`.
+
+### Contract gate (Pact broker)
+
+`docker compose up -d --wait` also starts a Pact broker on 21112, with its own Postgres. `verify:provider` switches on `PACT_BROKER_URL`: unset, it verifies the local `pacts/` file; set, it pulls the pact from the broker and publishes the result under `PROVIDER_VERSION`, or the short git SHA when that's unset. Through the vault, `bash scripts/with-secrets.sh dev npm run verify:provider` gets `PACT_BROKER_URL` from `.secrets/infisical.env`; without one, `SKIP_VAULT=1 PACT_BROKER_URL=http://127.0.0.1:21112 npm run verify:provider` takes it from the shell. The local broker has no authentication; `PACT_BROKER_TOKEN` is passed on only when set, and never lives in the repo.
+
+The gate, as run (consumer and provider version both `0d3d994`, the commit under test):
+
+```bash
+docker compose up -d --wait                                   # pact-broker healthy
+npm run test:contract
+curl -X PUT http://127.0.0.1:21112/pacts/provider/m-api/consumer/web-app/version/0d3d994 \
+  -H 'Content-Type: application/json' -d @pacts/web-app-m-api.json          # 201
+PACT_BROKER_URL=http://127.0.0.1:21112 npm run verify:provider              # exit 0, prints "as m-api version 0d3d994"
+curl -H 'Accept: application/hal+json' \
+  "http://127.0.0.1:21112/can-i-deploy?pacticipant=web-app&version=0d3d994&to=prod"
+curl -X PUT http://127.0.0.1:21112/pacticipants/m-api/versions/0d3d994/tags/prod \
+  -H 'Content-Type: application/json'                                       # 201
+curl -H 'Accept: application/hal+json' \
+  "http://127.0.0.1:21112/can-i-deploy?pacticipant=web-app&version=0d3d994&to=prod"
+```
+
+`can-i-deploy` before the tag (the response's `summary`). No provider version is tagged `prod` yet, so the broker can't say yes or no:
+
+```json
+{"deployable": null, "reason": "There is no verified pact between version 0d3d994 of web-app and the latest version of m-api with tag prod (no such version exists)", "success": 0, "failed": 0, "unknown": 1}
+```
+
+After tagging the verified provider version `prod`:
+
+```json
+{"deployable": true, "reason": "All required verification results are published and successful", "success": 1, "failed": 0, "unknown": 0}
+```
+
+The third answer, from a provider that broke the contract (`title` renamed, verified as version `broken`, tagged `prod`): `{"deployable": false, … "with tag prod (broken) failed", "failed": 1}`. The tag must go on exactly the version the verifier published; "latest with tag prod" means the newest such **version**, not the newest tag.
+
+The brief's grader uses tags (`tags/prod`, `to=prod`), so this follows it. Current Pact docs prefer `record-deployment` with environments over tags; locally the verifier selects `{ latest: true }` because a plain `curl` publish carries no branch, and CI publishes with one.
 
 ## Known gaps
 
