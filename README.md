@@ -56,6 +56,48 @@ The row counts are `11|11|60|120` after the first seed and after the second — 
 
 Optional: `DEMO_COMPARE=1 npm run demo:workers` and `DEMO_COMPARE=1 npm run demo:retry` add the contrast runs — the same work without `SKIP LOCKED`, and under `READ COMMITTED` — see [Concurrency](#concurrency).
 
+### HW#16: tests and the contract gate
+
+Needs Docker running (Testcontainers starts its own Postgres) and the setup above: `secrets/db_password` created, `docker compose up -d --wait` (it also starts the Pact broker on 21112). `PACT_BROKER_URL` is set only on the gate commands; everything before them verifies the local pact file. Run from a clean tree: the gate's version is the commit SHA.
+
+```bash
+npm ci && npx tsc --noEmit
+npm run test:integration && npm run test:integration
+npm run test:e2e
+npm run test:contract
+npm run verify:provider
+node -e 'const p=require("./pacts/web-app-m-api.json");const spec=require("fs").readFileSync("openapi/openapi.yaml","utf8");const sp=[...spec.matchAll(/^\s+(\/\S*):\s*$/gm)].map(m=>m[1]);const seg=s=>s.split("?")[0].replace(/\/+$/,"").split("/");const fit=(a,b)=>{a=seg(a);b=seg(b);return a.length===b.length&&a.every((x,i)=>/^\{[^}]+\}$/.test(x)?b[i]!=="":x===b[i])};const bad=p.interactions.filter(i=>!sp.some(x=>fit(x,i.request.path)));console.log(bad.length?"НЕМАЄ У СПЕЦІ: "+bad.map(i=>i.request.path).join(", "):"OK");process.exit(bad.length?1:0)'
+grep -rn "can-i-deploy" .github/workflows/
+python3 -c "import yaml;yaml.safe_load(open('.github/workflows/ci.yml'))"   # needs PyYAML
+
+V=$(git rev-parse --short HEAD)
+curl -X PUT http://127.0.0.1:21112/pacts/provider/m-api/consumer/web-app/version/$V \
+  -H 'Content-Type: application/json' -d @pacts/web-app-m-api.json
+PACT_BROKER_URL=http://127.0.0.1:21112 npm run verify:provider
+curl "http://127.0.0.1:21112/can-i-deploy?pacticipant=web-app&version=$V&to=prod"     # "deployable":null, "unknown":1
+curl -X PUT http://127.0.0.1:21112/pacticipants/m-api/versions/$V/tags/prod -H 'Content-Type: application/json'
+curl "http://127.0.0.1:21112/can-i-deploy?pacticipant=web-app&version=$V&to=prod"     # "deployable":true
+
+test -f scripts/with-secrets.sh && grep -q SKIP_VAULT scripts/with-secrets.sh && echo OK
+grep -rnE "PACT_BROKER_TOKEN[\"']?[[:space:]]*[:=][[:space:]]*[\"'][^\"'$]" --include='*.ts' --include='*.js' \
+  --include='*.yml' --include='*.yaml' --include='*.json' . | grep -v node_modules   # prints nothing
+```
+
+| Criterion | Command → expected |
+|---|---|
+| Integration, run twice | `npm run test:integration && npm run test:integration` → `PASS` lines, `Tests: 19 passed` twice |
+| E2E | `npm run test:e2e` → `Tests: 6 passed` |
+| Constraint tests | `grep -rniE "duplicate key\|unique\|2350[0-9]\|foreign key\|constraint" test/` → `23514`, `23503`, `23505` |
+| E2E negative cases | `grep -rnE "\b(400\|404\|409\|422)\b" test/e2e/` → matches |
+| Testcontainers | `grep -rn "PostgreSqlContainer" test/` → `test/integration/testkit/postgres.ts` |
+| Pact file with provider states | `npm run test:contract && grep providerStates pacts/web-app-m-api.json` |
+| Provider verification | `npm run verify:provider 2>&1 \| sed -E $'s/\\x1b\\[[0-9;]*m//g' \| grep -F "has a matching body (OK)"` → 2 lines |
+| Pact paths exist in the spec | the `node -e` check above (`pacts/web-app-m-api.json` vs `openapi/openapi.yaml`) → `OK` |
+| Broker gate | the six commands above, consumer `web-app`, provider `m-api`, broker `http://127.0.0.1:21112` → `null`/`unknown: 1`, then `true` |
+| CI | `grep -rn "can-i-deploy" .github/workflows/` and the `yaml.safe_load` check |
+| Vault wrapper | `test -f scripts/with-secrets.sh && grep -q SKIP_VAULT scripts/with-secrets.sh` |
+| No literal token | the `PACT_BROKER_TOKEN` grep above → no output |
+
 ## TypeORM data layer
 
 The HW#12 schema as entities in [src/entities/](src/entities/), created by the migration in [src/migrations/](src/migrations/). `synchronize: false` in [src/data-source.ts](src/data-source.ts): the schema changes only through reviewed migrations.
@@ -334,18 +376,20 @@ The drill proves a dump restores; this is the procedure for bringing the real da
 6. **Point PgBouncer at it:** in [pgbouncer/pgbouncer.ini](pgbouncer/pgbouncer.ini), change `[databases]` to `shop = host=shop-restored port=5432 dbname=shop`, then run `RELOAD` on the admin console. The app's `DB_URL` doesn't change.
 7. **Start the app** and check it: `GET /db` returns `app_user`, and `SHOW POOLS` shows the `shop` pool in use.
 
-## Testing
+## Testing (Тестування)
 
 ```bash
-npm run test:integration
-npm run test:e2e
-npm run test:contract    # consumer: writes pacts/web-app-m-api.json
-npm run verify:provider  # provider: the real app against that pact
+npm run test:integration   # repositories against real Postgres: SQL behaviour, constraints, grants
+npm run test:e2e           # the whole app over HTTP: real AppModule, no overrides, production setup
+npm run test:contract      # the consumer's expectations: writes pacts/web-app-m-api.json
+npm run verify:provider    # the real provider against that pact
 ```
 
-Integration tests run against a throwaway Postgres container (Testcontainers): the same image as the compose `db`, `init.sql` applied first, then the real migrations. The code under test connects as `app_user`, so a missing grant fails a test; only setup runs as admin ([test/integration/testkit/](test/integration/testkit/)).
+Every script builds first (`tsc -p tsconfig.test.json` into `dist-test/`), and Jest runs the compiled JavaScript.
 
-Tests are isolated with `TRUNCATE … RESTART IDENTITY CASCADE` before each one, not a transaction rolled back after it. `checkout()` opens and commits its own transactions and takes row locks, and the E2E tests run the app on its own pool, so a per-test rollback can't contain either. It's the same split Django makes between `TestCase` and `TransactionTestCase`.
+**Isolation.** Tests are isolated with `TRUNCATE … RESTART IDENTITY CASCADE` before each one, not a transaction rolled back after it. `checkout()` opens and commits its own transactions and takes row locks, and the E2E tests run the app on its own pool, so a per-test rollback can't contain either. It's the same split Django makes between `TestCase` and `TransactionTestCase`. The table list comes from TypeORM's entity metadata, so the `migrations` table is never touched, and it runs as admin: `app_user` has no `TRUNCATE`, which a test checks.
+
+**The test database.** Each test file starts a throwaway Postgres container (Testcontainers) built like the compose `db`: the same image, admin as the superuser, `init.sql` applied first (its roles and default privileges), then the real migrations, the same list the TypeORM CLI runs. The code under test connects as `app_user`, so a missing grant fails a test; only setup and `reset()` run as admin ([test/integration/testkit/](test/integration/testkit/)). Tests never touch the compose `db` or PgBouncer.
 
 The E2E tests ([test/e2e/](test/e2e/)) boot the real `AppModule`, with no provider overrides and the same `configureApp()` as `main.ts`, on the same kind of container. `DB_URL` is pointed at the container **before** `AppModule` is imported (a dynamic `import()` in `beforeAll`): `ConfigModule` reads the environment on first import, and a static import would pick up `.env`, which points at the dev database. `beforeAll` also checks the app's connection port and stops if it isn't the container's.
 
@@ -387,11 +431,11 @@ After tagging the verified provider version `prod`:
 
 The third answer, from a provider that broke the contract (`title` renamed, verified as version `broken`, tagged `prod`): `{"deployable": false, … "with tag prod (broken) failed", "failed": 1}`. The tag must go on exactly the version the verifier published; "latest with tag prod" means the newest such **version**, not the newest tag.
 
-The brief's grader uses tags (`tags/prod`, `to=prod`), so this follows it. Current Pact docs prefer `record-deployment` with environments over tags; locally the verifier selects `{ latest: true }` because a plain `curl` publish carries no branch, and CI publishes with one.
+The brief's grader uses tags (`tags/prod`, `to=prod`), so this follows it; current Pact docs prefer `record-deployment` with environments, which CI uses. Locally the verifier selects `{ latest: true }`, because a plain `curl` publish carries no branch; CI publishes with one and sets `PROVIDER_BRANCH`, so there it selects `{ matchingBranch: true }`: the pact this commit's branch just published.
 
 ### CI ([.github/workflows/ci.yml](.github/workflows/ci.yml))
 
-Two jobs on every push and pull request. `tests` runs `test:integration` and `test:e2e`. `contract` starts the broker from this same `docker-compose.yml`, runs the consumer test, publishes the pact with the Pact CLI (`pactfoundation/pact-cli`, consumer version = commit SHA, branch = the PR's or pushed branch), verifies the provider and publishes the result under the same SHA, records that provider version as deployed to `production`, and runs `can-i-deploy --pacticipant web-app --version <sha> --to-environment production`, which exits 1, failing the job, unless the answer is yes. `PACT_BROKER_URL` and `PACT_BROKER_TOKEN` come from GitHub secrets; without them the job falls back to the broker it starts itself.
+Two jobs, on every pull request and every push to `main`. `tests` runs `test:integration` and `test:e2e`. `contract` starts the broker from this same `docker-compose.yml`, runs the consumer test, publishes the pact with the Pact CLI (`pactfoundation/pact-cli`, consumer version = commit SHA, branch = the PR's or pushed branch), verifies the provider and publishes the result under the same SHA, records that provider version as deployed to `production`, and runs `can-i-deploy --pacticipant web-app --version <sha> --to-environment production`, which exits 1, failing the job, unless the answer is yes. `PACT_BROKER_URL` and `PACT_BROKER_TOKEN` come from GitHub secrets; without them the job falls back to the broker it starts itself.
 
 The `can-i-deploy` step on the first green run (commit `e2f2045`):
 
@@ -405,11 +449,16 @@ web-app  | e2f2045... | m-api    | e2f2045... | true     | 1
 All required verification results are published and successful
 ```
 
+A provider that breaks the contract fails the job before `can-i-deploy` is ever asked. On a throwaway branch with `title` renamed to `name` (commit `bf9fd7a`), **Contract (Pact)** failed at *Verify the provider and publish the result*: the response validator answered 500 (`/response must have required property 'title'`), Pact reported `expected 200 but was 500`, and the deployment and `can-i-deploy` steps were skipped. **Integration and E2E tests** failed too: integration passed (19/19, the repositories don't see API field names), and E2E failed on `GET /products` for the same 500.
+
 CI uses environments (`record-deployment`, `--to-environment`) rather than the tags of the local gate: a broker started fresh in each job has no `prod` tag, so `to=prod` would always answer unknown. Recording the provider's deployment first models the real order, provider before consumer. The limit: a broker that lives for one job only proves this commit's consumer and provider agree with each other. A persistent broker would check the consumer against what is actually deployed.
 
-## Known gaps
+### Known gaps
 
 - **Idempotency-Key replays are kept in memory:** per process, lost on restart, and two simultaneous requests with the same key can both create an order. A table with a unique key on the idempotency key is the durable version.
+- **`app-v1-password` lives in several places:** `init.sql`, the testkit, CI's `secrets/db_password` step and the Grading setup. Rotating the dev password means changing all of them.
+- **The provider version is the commit SHA,** which only identifies the code on a clean tree: uncommitted changes get verified and published under `HEAD`'s SHA.
+- **CI's broker lives for one job:** it proves this commit's consumer and provider agree, not that the consumer works with what is actually deployed.
 
 ## Configuration
 

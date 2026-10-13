@@ -18,17 +18,19 @@ const git = (args: string) => execSync(`git ${args}`, { encoding: 'utf8' }).trim
 // and the result is published under this version. Without it, the local file.
 const brokerUrl = process.env.PACT_BROKER_URL;
 const providerVersion = process.env.PROVIDER_VERSION ?? git('rev-parse --short HEAD');
+const providerBranch = process.env.PROVIDER_BRANCH;
 const source = brokerUrl
   ? {
       pactBrokerUrl: brokerUrl,
       ...(process.env.PACT_BROKER_TOKEN ? { pactBrokerToken: process.env.PACT_BROKER_TOKEN } : {}),
-      // The brief publishes with a plain curl PUT, which carries no branch, so
-      // branch-based selectors would find nothing. Once publishing records a
-      // branch (CI does), use { mainBranch: true } and { deployedOrReleased: true }.
-      consumerVersionSelectors: [{ latest: true }],
+      // CI publishes the pact with its branch and sets PROVIDER_BRANCH: verify the
+      // consumer version from the same branch, which is the pact this commit made.
+      // The local gate publishes with a plain curl PUT, which carries no branch,
+      // so branch-based selectors would find nothing there: latest instead.
+      consumerVersionSelectors: providerBranch ? [{ matchingBranch: true }] : [{ latest: true }],
       publishVerificationResult: true,
       providerVersion,
-      providerVersionBranch: process.env.PROVIDER_BRANCH ?? git('rev-parse --abbrev-ref HEAD'),
+      providerVersionBranch: providerBranch ?? git('rev-parse --abbrev-ref HEAD'),
     }
   : { pactUrls: [PACT_FILE] };
 

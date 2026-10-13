@@ -1,7 +1,10 @@
 name: CI
 
+# Pull requests run the checks; push only for main, so a push to a PR branch
+# doesn't run everything twice.
 on:
   push:
+    branches: [main]
   pull_request:
 
 env:

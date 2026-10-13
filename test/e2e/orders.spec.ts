@@ -78,13 +78,21 @@ describe('Orders API (e2e)', () => {
     expect(body).toMatchObject({ status: 404 });
   });
 
-  it('answers 400 when the body breaks the spec (no user_id), and writes nothing', async () => {
+  it('answers 400 when the body breaks the spec (no user_id, quantity 0), and writes nothing', async () => {
     const product = await aProduct().insertVia(products);
 
     await api()
       .post('/orders')
       .set('Idempotency-Key', randomUUID())
       .send({ items: [{ product_id: Number(product.id), quantity: 1 }] })
+      .expect(400);
+    // quantity: 0 would reach checkout() as a RangeError, a 500: the spec's
+    // minimum: 1 has to stop it first.
+    const user = await aUser().insertVia(users);
+    await api()
+      .post('/orders')
+      .set('Idempotency-Key', randomUUID())
+      .send(orderBody(user, product, 0))
       .expect(400);
     expect(await db.admin.manager.count(OrderEntity)).toBe(0);
   });
