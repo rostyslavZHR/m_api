@@ -26,7 +26,9 @@
     "demo:workers": "node --env-file-if-exists=.env dist/demo-workers.js",
     "demo:retry": "node --env-file-if-exists=.env dist/demo-retry.js",
     "build:test": "rm -rf dist-test && tsc -p tsconfig.test.json",
-    "test:integration": "npm run build:test && node --experimental-vm-modules node_modules/jest/bin/jest.js dist-test/test/integration"
+    "test:integration": "npm run build:test && node --experimental-vm-modules node_modules/jest/bin/jest.js dist-test/test/integration",
+    "test:contract": "npm run build:test && node --experimental-vm-modules node_modules/jest/bin/jest.js dist-test/test/contract",
+    "verify:provider": "npm run build:test && node dist-test/test/contract/verify-provider.js"
   },
   "dependencies": {
     "@nestjs/common": "^12.0.3",
@@ -44,6 +46,7 @@
     "@nestjs/cli": "^12.0.0",
     "@nestjs/schematics": "^12.0.0",
     "@nestjs/testing": "^12.0.1",
+    "@pact-foundation/pact": "^17.1.4",
     "@testcontainers/postgresql": "^12.2.0",
     "@types/express": "^5.0.0",
     "@types/jest": "^30.0.0",

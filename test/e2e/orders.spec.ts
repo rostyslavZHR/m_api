@@ -1,11 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import type { NestExpressApplication } from '@nestjs/platform-express';
-import { Test } from '@nestjs/testing';
 import request from 'supertest';
-import { DataSource, type Repository } from 'typeorm';
-import { appOptions, configureApp } from '../../src/app.setup.js';
+import type { Repository } from 'typeorm';
 import { JobEntity, OrderEntity, ProductEntity, UserEntity } from '../../src/entities/index.js';
 import { ProductsRepository } from '../../src/products/products.repository.js';
+import { createTestApp } from '../integration/testkit/app.js';
 import { aProduct, aUser } from '../integration/testkit/builders.js';
 import { startTestDatabase, type TestDatabase } from '../integration/testkit/postgres.js';
 
@@ -23,23 +22,7 @@ describe('Orders API (e2e)', () => {
 
   beforeAll(async () => {
     db = await startTestDatabase();
-
-    // ConfigModule reads and validates the environment when app.module.ts is
-    // first imported. A static import would run before this line and take
-    // DB_URL from .env: PgBouncer and the dev database.
-    process.env.DB_URL = db.appUrl;
-    const { AppModule } = await import('../../src/app.module.js');
-
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = configureApp(moduleRef.createNestApplication<NestExpressApplication>(appOptions));
-    await app.init();
-
-    // Stop before any request can write to the wrong database.
-    const { port } = app.get(DataSource).options as { port?: number };
-    if (port !== Number(new URL(db.appUrl).port)) {
-      throw new Error(`The app connected to port ${port}, not the test container`);
-    }
-
+    app = await createTestApp(db);
     products = new ProductsRepository(db.app.manager);
     users = db.app.getRepository(UserEntity);
   });

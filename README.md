@@ -333,11 +333,13 @@ The drill proves a dump restores; this is the procedure for bringing the real da
 6. **Point PgBouncer at it:** in [pgbouncer/pgbouncer.ini](pgbouncer/pgbouncer.ini), change `[databases]` to `shop = host=shop-restored port=5432 dbname=shop`, then run `RELOAD` on the admin console. The app's `DB_URL` doesn't change.
 7. **Start the app** and check it: `GET /db` returns `app_user`, and `SHOW POOLS` shows the `shop` pool in use.
 
-## Testing (Тестування)
+## Testing
 
 ```bash
 npm run test:integration
 npm run test:e2e
+npm run test:contract    # consumer: writes pacts/web-app-m-api.json
+npm run verify:provider  # provider: the real app against that pact
 ```
 
 Integration tests run against a throwaway Postgres container (Testcontainers): the same image as the compose `db`, `init.sql` applied first, then the real migrations. The code under test connects as `app_user`, so a missing grant fails a test; only setup runs as admin ([test/integration/testkit/](test/integration/testkit/)).
@@ -345,6 +347,10 @@ Integration tests run against a throwaway Postgres container (Testcontainers): t
 Tests are isolated with `TRUNCATE … RESTART IDENTITY CASCADE` before each one, not a transaction rolled back after it. `checkout()` opens and commits its own transactions and takes row locks, and the E2E tests run the app on its own pool, so a per-test rollback can't contain either. It's the same split Django makes between `TestCase` and `TransactionTestCase`.
 
 The E2E tests ([test/e2e/](test/e2e/)) boot the real `AppModule`, with no provider overrides and the same `configureApp()` as `main.ts`, on the same kind of container. `DB_URL` is pointed at the container **before** `AppModule` is imported (a dynamic `import()` in `beforeAll`): `ConfigModule` reads the environment on first import, and a static import would pick up `.env`, which points at the dev database. `beforeAll` also checks the app's connection port and stops if it isn't the container's.
+
+**Contract (Pact).** An imaginary frontend, `web-app`, consumes `m-api` (the names are fixed: pact file, verifier, broker and can-i-deploy all use them). Its consumer test ([test/contract/](test/contract/)) drives a small `ProductsClient`, not raw `fetch`, and records two interactions on `GET /products/{id}`: `product 42 exists` → 200 with `id`, `title`, `price_cents`, `in_stock` (matchers, not exact values), and `product 999 does not exist` → 404 `application/problem+json`. `verify:provider` runs the real app (container, migrations, `configureApp()`, the same boot as E2E) against that file; each provider state starts from `reset()`, so verification is repeatable. `pacts/` is gitignored: `test:contract` (and CI) generates it, so a stale file can't pass for a current one.
+
+The spec and the contract are two separate nets. When the provider renamed `title` to `name`, the OpenAPI response validator caught it first: the app answered 500 (`/response must have required property 'title'`), and Pact reported `expected 200 but was 500` before comparing any body. When the consumer asked for a field the provider doesn't return (`currency`), the spec had nothing to say and Pact caught it: `Actual map is missing the following keys: currency`.
 
 ## Known gaps
 
