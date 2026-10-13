@@ -393,6 +393,18 @@ The brief's grader uses tags (`tags/prod`, `to=prod`), so this follows it. Curre
 
 Two jobs on every push and pull request. `tests` runs `test:integration` and `test:e2e`. `contract` starts the broker from this same `docker-compose.yml`, runs the consumer test, publishes the pact with the Pact CLI (`pactfoundation/pact-cli`, consumer version = commit SHA, branch = the PR's or pushed branch), verifies the provider and publishes the result under the same SHA, records that provider version as deployed to `production`, and runs `can-i-deploy --pacticipant web-app --version <sha> --to-environment production`, which exits 1, failing the job, unless the answer is yes. `PACT_BROKER_URL` and `PACT_BROKER_TOKEN` come from GitHub secrets; without them the job falls back to the broker it starts itself.
 
+The `can-i-deploy` step on the first green run (commit `e2f2045`):
+
+```
+Computer says yes \o/
+
+CONSUMER | C.VERSION  | PROVIDER | P.VERSION  | SUCCESS? | RESULT#
+---------|------------|----------|------------|----------|--------
+web-app  | e2f2045... | m-api    | e2f2045... | true     | 1
+
+All required verification results are published and successful
+```
+
 CI uses environments (`record-deployment`, `--to-environment`) rather than the tags of the local gate: a broker started fresh in each job has no `prod` tag, so `to=prod` would always answer unknown. Recording the provider's deployment first models the real order, provider before consumer. The limit: a broker that lives for one job only proves this commit's consumer and provider agree with each other. A persistent broker would check the consumer against what is actually deployed.
 
 ## Known gaps
