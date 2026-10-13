@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  # Pre-pulled, so a test's 60 s timeout isn't spent downloading.
+  POSTGRES_IMAGE: postgres:16-alpine
+  RYUK_IMAGE: testcontainers/ryuk:0.14.0
+  PACT_CLI_IMAGE: pactfoundation/pact-cli:1.5.0.5
+
+jobs:
+  tests:
+    name: Integration and E2E tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24 # Testcontainers needs Node >= 22.22
+          cache: npm
+      - run: npm ci
+      - run: docker pull "$POSTGRES_IMAGE" && docker pull "$RYUK_IMAGE"
+      # The app reads app_user's password from this file; CI has none. The value
+      # is init.sql's dev password, already in the repo.
+      - run: mkdir -p secrets && printf 'app-v1-password' > secrets/db_password
+      - run: npm run test:integration
+      - run: npm run test:e2e
+
+  contract:
+    name: Contract (Pact)
+    runs-on: ubuntu-24.04
+    env:
+      # From secrets; without them the job uses the broker it starts itself.
+      PACT_BROKER_URL: ${{ secrets.PACT_BROKER_URL || 'http://localhost:21112' }}
+      PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+      # The commit under test is both the consumer and the provider version.
+      VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
+      BRANCH: ${{ github.head_ref || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: docker pull "$POSTGRES_IMAGE" && docker pull "$RYUK_IMAGE" && docker pull "$PACT_CLI_IMAGE"
+      - run: mkdir -p secrets && printf 'app-v1-password' > secrets/db_password
+
+      # The same broker and database definition as locally, healthcheck included.
+      # It lives only for this job: it proves this commit's consumer and provider
+      # agree, not that the consumer works with what's really in production.
+      - run: docker compose up -d --wait pact-broker
+
+      - name: Consumer test (writes pacts/)
+        run: npm run test:contract
+
+      - name: Publish the pact
+        run: |
+          docker run --rm --network host -v "$PWD":/work -w /work \
+            -e PACT_BROKER_BASE_URL="$PACT_BROKER_URL" ${PACT_BROKER_TOKEN:+-e PACT_BROKER_TOKEN} \
+            "$PACT_CLI_IMAGE" pact-broker publish pacts \
+            --consumer-app-version "$VERSION" --branch "$BRANCH"
+
+      - name: Verify the provider and publish the result
+        run: npm run verify:provider
+        env:
+          PROVIDER_VERSION: ${{ env.VERSION }}
+          PROVIDER_BRANCH: ${{ env.BRANCH }}
+
+      # The provider deploys first. The broker creates the production environment
+      # itself on first start.
+      - name: Record the provider deployment to production
+        run: |
+          docker run --rm --network host \
+            -e PACT_BROKER_BASE_URL="$PACT_BROKER_URL" ${PACT_BROKER_TOKEN:+-e PACT_BROKER_TOKEN} \
+            "$PACT_CLI_IMAGE" pact-broker record-deployment \
+            --pacticipant m-api --version "$VERSION" --environment production
+
+      # Exits 1 unless the answer is yes, which fails the job.
+      - name: can-i-deploy web-app to production
+        run: |
+          docker run --rm --network host \
+            -e PACT_BROKER_BASE_URL="$PACT_BROKER_URL" ${PACT_BROKER_TOKEN:+-e PACT_BROKER_TOKEN} \
+            "$PACT_CLI_IMAGE" pact-broker can-i-deploy \
+            --pacticipant web-app --version "$VERSION" --to-environment production
