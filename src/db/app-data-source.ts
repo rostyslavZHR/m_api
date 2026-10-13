@@ -4,14 +4,14 @@ import { DatabaseError } from 'pg';
 import { DataSource } from 'typeorm';
 import { entities } from '../entities/index.js';
 
-// From the working directory, not this file: it compiles to different depths
-// under dist/ and dist-test/, while everything runs from the repo root.
-const PASSWORD_FILE = path.resolve('secrets/db_password');
-
 // Any password in DB_URL is ignored. The file is read on every new connection,
-// so rotate.sh needs no restart.
+// so rotate.sh needs no restart. DB_PASSWORD_FILE overrides the path (the tests
+// point it at the container's password); the default is resolved from the
+// working directory, not this file, which compiles to different depths under
+// dist/ and dist-test/.
 export const createAppDataSource = (dbUrl: string) => {
   const { hostname, port, pathname, username } = new URL(dbUrl);
+  const passwordFile = path.resolve(process.env.DB_PASSWORD_FILE ?? 'secrets/db_password');
 
   return new DataSource({
     type: 'postgres',
@@ -19,7 +19,7 @@ export const createAppDataSource = (dbUrl: string) => {
     port: Number(port),
     database: pathname.slice(1),
     username,
-    password: async () => (await readFile(PASSWORD_FILE, 'utf8')).trim(),
+    password: async () => (await readFile(passwordFile, 'utf8')).trim(),
     entities,
     synchronize: false,
     poolSize: 3,

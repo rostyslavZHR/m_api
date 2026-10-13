@@ -25,9 +25,6 @@ jobs:
           cache: npm
       - run: npm ci
       - run: docker pull "$POSTGRES_IMAGE" && docker pull "$RYUK_IMAGE"
-      # The app reads app_user's password from this file; CI has none. The value
-      # is init.sql's dev password, already in the repo.
-      - run: mkdir -p secrets && printf 'app-v1-password' > secrets/db_password
       - run: npm run test:integration
       - run: npm run test:e2e
 
@@ -49,7 +46,6 @@ jobs:
           cache: npm
       - run: npm ci
       - run: docker pull "$POSTGRES_IMAGE" && docker pull "$RYUK_IMAGE" && docker pull "$PACT_CLI_IMAGE"
-      - run: mkdir -p secrets && printf 'app-v1-password' > secrets/db_password
 
       # The same broker and database definition as locally, healthcheck included.
       # It lives only for this job: it proves this commit's consumer and provider

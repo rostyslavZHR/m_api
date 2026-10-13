@@ -456,7 +456,7 @@ CI uses environments (`record-deployment`, `--to-environment`) rather than the t
 ### Known gaps
 
 - **Idempotency-Key replays are kept in memory:** per process, lost on restart, and two simultaneous requests with the same key can both create an order. A table with a unique key on the idempotency key is the durable version.
-- **`app-v1-password` lives in several places:** `init.sql`, the testkit, CI's `secrets/db_password` step and the Grading setup. Rotating the dev password means changing all of them.
+- **`app-v1-password` lives in three places:** `init.sql`, the testkit (which hands it to the test app through `DB_PASSWORD_FILE`), and the Grading setup's `secrets/db_password` for running the app itself. Rotating the dev password means changing all three.
 - **The provider version is the commit SHA,** which only identifies the code on a clean tree: uncommitted changes get verified and published under `HEAD`'s SHA.
 - **CI's broker lives for one job:** it proves this commit's consumer and provider agree, not that the consumer works with what is actually deployed.
 
