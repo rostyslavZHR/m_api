@@ -344,14 +344,15 @@ The app's runtime connections go through PgBouncer ([pgbouncer/pgbouncer.ini](pg
 ### Backup
 
 ```bash
-export DB_URL=postgres://app_user@localhost:21111/shop
-SKIP_VAULT=1 bash scripts/with-secrets.sh dev bash scripts/backup.sh
+bash scripts/with-secrets.sh dev bash scripts/backup.sh          # MIGRATIONS_DB_URL from the vault
+MIGRATIONS_DB_URL=postgres://admin:admin-bootstrap-only@localhost:21110/shop \
+  SKIP_VAULT=1 bash scripts/with-secrets.sh dev bash scripts/backup.sh   # or from the shell
 ```
 
-[scripts/backup.sh](scripts/backup.sh) writes `backups/shop_<UTC timestamp>.dump` (for example `shop_20261010T221922Z.dump`), a `pg_dump -Fc` archive, and prints its path as the last line. Only the database name is read from `DB_URL` (or `DATABASE_URL`); the dump itself runs inside the `db` container as its superuser over the local socket, so the script holds no credentials. `DB_URL` must be exported: the script doesn't read `.env`, and the vault doesn't hold it. It runs from any directory, since it `cd`s to the repo root first.
+[scripts/backup.sh](scripts/backup.sh) writes `backups/shop_<UTC timestamp>.dump` (for example `shop_20261017T184352Z.dump`), a `pg_dump -Fc` archive, and prints its path as the last line. It connects with `MIGRATIONS_DB_URL`, the schema owner's direct connection, and takes host, port, user and password from it, so the database can be anywhere this machine reaches (cron on another host included). Not `DB_URL`: that's `app_user` through PgBouncer, and `app_user` can't read the `pgbouncer` schema, while `pg_dump` needs a session that transaction pooling doesn't keep. The Postgres tools run in a throwaway `postgres:<major>-alpine` container whose major version matches the server's (`pg_dump` must be at least that new); a `localhost` URL is pointed at the Docker host. It runs from any directory.
 
-- **Fails instead of writing a bad backup:** it exits non-zero if `db` isn't reachable, if `orders` is missing or empty ("database is empty: run migrate and seed first"), or if `pg_dump` fails. The archive is written under a temporary name and only renamed once `pg_dump` succeeds; a failed run leaves nothing in `backups/`.
-- **Control values:** `<dump>.check` holds `count(*)|sum(total_cents)` of `orders`, read just before the dump. The restore drill compares the restored database against this file, not against the live one.
+- **Fails instead of writing a bad backup:** it exits non-zero if the database isn't reachable, if `orders` is missing or empty ("database is empty: run migrate and seed first"), or if `pg_dump` fails. The archive is written under a temporary name and only renamed once everything succeeded; a failed run leaves nothing in `backups/`.
+- **Control values:** `<dump>.check` holds each table's row count plus `sum(total_cents)` of `orders`, **read back from the dump's own data** (`pg_restore --data-only`), so they describe exactly the dump's snapshot, not the database a moment before or after. The restore drill compares the restored database against this file, table by table.
 - **Check an archive** with the container's Postgres 16 tools: `docker compose exec -T db pg_restore --list < backups/shop_….dump`. The host's `pg_restore` 14 rejects it (`unsupported version (1.15) in file header`): an archive can only be read by a `pg_restore` at least as new as the `pg_dump` that wrote it.
 - **The dump has no roles.** Roles are cluster-wide and `pg_dump` covers one database, but the dump's `OWNER TO admin` and its grants to `app_user` and `pgbouncer_auth` still name them. Restoring into a fresh Postgres needs those roles created first.
 - Dumps contain real data: `backups/` is in `.gitignore` and `.dockerignore`, and the files are created owner-only (`umask 077`).
@@ -362,7 +363,7 @@ SKIP_VAULT=1 bash scripts/with-secrets.sh dev bash scripts/backup.sh
 - **Retention:** nothing deletes old dumps yet; that belongs with S3 lifecycle rules (#26).
 - **Off-host copies:** none yet. A dump on the same machine doesn't survive losing the machine.
 
-**Restore drill:** `bash scripts/restore-drill.sh` restores the newest dump into a throwaway container and prints `MATCH` when its `orders` equal the dump's `.check`. See [RESTORE-DRILL.md](RESTORE-DRILL.md) for the last run and what a real recovery needs first.
+**Restore drill:** `bash scripts/restore-drill.sh` restores the newest dump into a throwaway container, from the Postgres major version in the dump's own header (so it works with `db` down), and prints `MATCH` when every value in the dump's `.check` matches. See [RESTORE-DRILL.md](RESTORE-DRILL.md) for the last run and what a real recovery needs first.
 
 ### How to recover
 
@@ -372,7 +373,7 @@ The drill proves a dump restores; this is the procedure for bringing the real da
 2. **Start a fresh Postgres** from the same image as `db`, reachable by PgBouncer. Here that means the compose network, for example `docker run -d --name shop-restored --network m_api_default -e POSTGRES_USER=admin -e POSTGRES_PASSWORD=… -e POSTGRES_DB=shop postgres:16-alpine`.
 3. **Create the roles** from [init.sql](init.sql)'s role section, with the real passwords from the vault: `CREATE ROLE app_user LOGIN PASSWORD …`, `GRANT CONNECT ON DATABASE shop TO app_user`, `CREATE ROLE pgbouncer_auth LOGIN PASSWORD …`. Only that section: the dump brings the `pgbouncer` schema, `get_auth()` and the default privileges itself, and running the rest of `init.sql` would conflict with it. `pgbouncer_auth`'s password must match `pgbouncer/userlist.txt`, or PgBouncer can't look up logins.
 4. **Restore the chosen dump:** `docker exec -i shop-restored pg_restore -U admin -d shop --no-owner --single-transaction < backups/shop_….dump`. Any error rolls the whole restore back.
-5. **Check the control values:** `SELECT count(*) || '|' || sum(total_cents) FROM orders` must equal the dump's `.check`.
+5. **Check the control values:** each table's `count(*)`, and `sum(total_cents)` of `orders`, must equal the dump's `.check` (one `table count` line per table).
 6. **Point PgBouncer at it:** in [pgbouncer/pgbouncer.ini](pgbouncer/pgbouncer.ini), change `[databases]` to `shop = host=shop-restored port=5432 dbname=shop`, then run `RELOAD` on the admin console. The app's `DB_URL` doesn't change.
 7. **Start the app** and check it: `GET /db` returns `app_user`, and `SHOW POOLS` shows the `shop` pool in use.
 
@@ -580,7 +581,7 @@ The multi-stage [Dockerfile](Dockerfile) only copies `dist/`, `package*.json`, `
 | `src/common/transaction-retry.ts` | `inTransactionWithRetry`: retries the whole transaction on `40001`/`40P01`, bounded, full jitter, `label` + `onRetry` |
 | `src/workers/` | the job worker: claim with `SKIP LOCKED`, work and complete in one transaction |
 | `src/demo-race.ts`, `src/demo-workers.ts`, `src/demo-retry.ts` | the three concurrency demos |
-| `scripts/backup.sh` | `pg_dump -Fc` of `shop` into `backups/`, with a `.check` sidecar, see [Backup](#backup) |
+| `scripts/backup.sh` | `pg_dump -Fc` via `MIGRATIONS_DB_URL` into `backups/`, with per-table control values read from the dump, see [Backup](#backup) |
 | `scripts/restore-drill.sh`, `RESTORE-DRILL.md` | restores the newest dump into a throwaway container and checks it; the last run's record |
 | `backup.cron` | nightly 03:00 schedule for `scripts/backup.sh`, with install notes |
 | `scripts/with-secrets.sh` | loads `.secrets/infisical.env` and runs the command; `SKIP_VAULT=1` skips the store |

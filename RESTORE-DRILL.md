@@ -1,6 +1,6 @@
 # Restore drill
 
-[scripts/restore-drill.sh](scripts/restore-drill.sh) restores the newest `backups/shop_*.dump` into a Postgres container created for that run, from the same image the running `db` uses. It then compares the restored `orders` against the dump's `.check` file, written by `backup.sh` at backup time, and prints `MATCH` (exit 0) or `MISMATCH` (exit 1). The container and its anonymous volume are removed on every exit, so every run starts from nothing. The dev database and its compose volume are never touched.
+[scripts/restore-drill.sh](scripts/restore-drill.sh) restores the newest `backups/shop_*.dump` into a Postgres container created for that run. The image's major version is read from the dump's own header (`Dumped from database version: 16.x`), so the drill needs no running `db`, which is what's missing in an outage. It then compares the restored database against the dump's `.check` file, which `backup.sh` read back from the dump's own data: each table's row count plus `sum(total_cents)` of `orders`, and prints `MATCH` (exit 0) or `MISMATCH` (exit 1). The container and its anonymous volume are removed on every exit, so every run starts from nothing. The dev database and its compose volume are never touched.
 
 ```bash
 SKIP_VAULT=1 bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
@@ -8,21 +8,33 @@ SKIP_VAULT=1 bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
 
 ## Last run
 
-| Field          | Value                                                         |
-|----------------|---------------------------------------------------------------|
-| Date           | 2026-10-10T22:29:57Z                                          |
-| Dump           | `shop_20261010T222901Z.dump`, 23958 bytes                     |
-| Image          | `postgres:16-alpine`                                          |
-| Restore only   | 230 ms                                                        |
-| End to end     | 2271 ms (container start, readiness, roles, restore, compare) |
-| Control values | expected `140\|210296000`, restored `140\|210296000`          |
-| Result         | `MATCH`                                                       |
+Run with `db` and `pgbouncer` **stopped**, to show the drill doesn't depend on them.
 
-A second run straight after printed `MATCH` again (restore 207 ms, end to end 2115 ms). Afterwards no container carried the `m_api.drill=1` label, the volume list was identical to before, and the dev database's `orders` still read `140|210296000`.
+| Field        | Value                                                         |
+|--------------|---------------------------------------------------------------|
+| Date         | 2026-10-17T18:45:03Z                                          |
+| Dump         | `shop_20261017T184401Z.dump`, 24637 bytes                     |
+| Image        | `postgres:16-alpine`, from the dump's header                  |
+| Restore only | 223 ms                                                        |
+| End to end   | 2606 ms (container start, readiness, roles, restore, compare) |
+| Result       | `MATCH`, 8 of 8 values                                        |
+
+| Control value               | Expected (`.check`) | Restored  |
+|-----------------------------|---------------------|-----------|
+| `public.jobs`               | 220                 | 220       |
+| `public.migrations`         | 4                   | 4         |
+| `public.order_items`        | 230                 | 230       |
+| `public.orders`             | 170                 | 170       |
+| `public.orders.total_cents` | 210326000           | 210326000 |
+| `public.products`           | 11                  | 11        |
+| `public.typeorm_metadata`   | 1                   | 1         |
+| `public.users`              | 11                  | 11        |
+
+Afterwards no container carried the `m_api.drill=1` label.
 
 ## RTO and RPO
 
-**RTO (measured, technical): 2.3 s end to end, 0.23 s restore.** This covers what the drill does: start a fresh Postgres, wait for it, create the roles, restore, compare. It doesn't carry over to a real outage:
+**RTO (measured, technical): 2.6 s end to end, 0.22 s restore.** This covers what the drill does: start a fresh Postgres, wait for it, create the roles, restore, compare. It doesn't carry over to a real outage:
 
 - The database is 24 KB. Restore time grows with data size and index builds, and a database of tens of GB takes hours, not seconds.
 - A real outage adds what the drill skips: noticing it, deciding to restore, setting up a server, recreating roles with real passwords, the restore itself, verifying, and pointing the app at the new database.
@@ -38,8 +50,8 @@ A second run straight after printed `MATCH` again (restore 207 ms, end to end 21
 - No retention: nothing deletes old dumps (S3 lifecycle rules, #26).
 - No globals backup: roles and their passwords aren't backed up (`pg_dumpall --globals-only`).
 - No alerting on a failed backup or a failed drill (#29).
-- The control values are read just before `pg_dump`, not from the same snapshot as the dump.
-- The drill checks one table: per-table row counts at backup time would catch a restore that lost another table.
+- The control values count rows and sum one money column; they would miss a restore that kept every row but changed values elsewhere.
+- The drill assumes the `postgres:<major>-alpine` image; a server built from another variant would need its own image name.
 
 ## Roles: what a real recovery needs first
 
@@ -53,8 +65,9 @@ Each exited 1, printed no `MATCH`, and left no container behind.
 
 | Case                                  | Result                                                                                                         |
 |---------------------------------------|----------------------------------------------------------------------------------------------------------------|
-| Wrong control value (`.check` edited) | `MISMATCH`, both values printed                                                                                |
+| Wrong control value (`.check` edited) | `MISMATCH`, every value printed with the differing one marked `✗` (`public.users 12 → 11 ✗`)                    |
 | Dump without `.check`                 | `no control values for this dump (….check is missing)`                                                         |
 | Damaged dump (first 5000 bytes)       | `pg_restore: error: could not read from input file: end of file`, then `pg_restore failed …: nothing compared` |
 | No dumps                              | `no dumps in backups/: run backup.sh first`                                                                    |
 | Leftover container from a killed run  | swept at the start of the next run, which then printed `MATCH`                                                 |
+| `.check` in the old one-line format   | `….check is in an old format: rerun backup.sh`                                                                 |
