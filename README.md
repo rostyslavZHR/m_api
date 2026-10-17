@@ -436,30 +436,33 @@ The brief's grader uses tags (`tags/prod`, `to=prod`), so this follows it; curre
 
 ### CI ([.github/workflows/ci.yml](.github/workflows/ci.yml))
 
-Two jobs, on every pull request and every push to `main`. `tests` runs `test:integration` and `test:e2e`. `contract` starts the broker from this same `docker-compose.yml`, runs the consumer test, publishes the pact with the Pact CLI (`pactfoundation/pact-cli`, consumer version = commit SHA, branch = the PR's or pushed branch), verifies the provider and publishes the result under the same SHA, records that provider version as deployed to `production`, and runs `can-i-deploy --pacticipant web-app --version <sha> --to-environment production`, which exits 1, failing the job, unless the answer is yes. `PACT_BROKER_URL` and `PACT_BROKER_TOKEN` come from GitHub secrets; without them the job falls back to the broker it starts itself.
+Two jobs, on every pull request and every push to `main`. `tests` runs `test:integration` and `test:e2e`. `contract`:
 
-The `can-i-deploy` step on the first green run (commit `e2f2045`):
+1. starts a broker from this same `docker-compose.yml`, unless a persistent one is configured (below);
+2. runs the consumer test and publishes the pact with the Pact CLI (`pactfoundation/pact-cli`): consumer version = commit SHA, branch = the PR's or pushed branch;
+3. verifies the provider and publishes the result under the same SHA. A failed verification is published but doesn't stop the job here;
+4. **the gate:** `can-i-deploy --pacticipant web-app --version <sha> --pacticipant m-api --version <sha>`, i.e. is this commit's consumer verified against this commit's provider. It exits 1 on a failed or missing verification, failing the job.
+
+With a persistent broker (`PACT_BROKER_URL` and `PACT_BROKER_TOKEN` as GitHub secrets), two more steps run: `can-i-deploy --pacticipant web-app --version <sha> --to-environment production`, which checks against the provider version actually recorded in production, and, only for a push to `main`, `record-deployment` of `m-api` to `production`. A job never records its own commit as deployed and then asks about it. Without the secrets, the job falls back to its own broker on `127.0.0.1:21112` (not `localhost`, which can resolve to IPv6).
+
+The gate, rehearsed locally with the same CLI command against the local broker:
 
 ```
-Computer says yes \o/
-
-CONSUMER | C.VERSION  | PROVIDER | P.VERSION  | SUCCESS? | RESULT#
----------|------------|----------|------------|----------|--------
-web-app  | e2f2045... | m-api    | e2f2045... | true     | 1
-
-All required verification results are published and successful
+good commit:        Computer says yes \o/   web-app | gate-good-1   | m-api | gate-good-1   | true   → exit 0
+provider breaks it: Computer says no ¯\_(ツ)_/¯   web-app | gate-broken-1 | m-api | gate-broken-1 | false  → exit 1
+never verified:     Computer says no ¯\_(ツ)_/¯                                                    → exit 1
 ```
 
-A provider that breaks the contract fails the job before `can-i-deploy` is ever asked. On a throwaway branch with `title` renamed to `name` (commit `bf9fd7a`), **Contract (Pact)** failed at *Verify the provider and publish the result*: the response validator answered 500 (`/response must have required property 'title'`), Pact reported `expected 200 but was 500`, and the deployment and `can-i-deploy` steps were skipped. **Integration and E2E tests** failed too: integration passed (19/19, the repositories don't see API field names), and E2E failed on `GET /products` for the same 500.
+The first green CI run (commit `e2f2045`, before the gate was reworked to the version pair) printed `Computer says yes \o/` with `web-app e2f2045… | m-api e2f2045… | true`. On a throwaway branch with `title` renamed to `name` (commit `bf9fd7a`, same earlier design), **Contract (Pact)** failed at verification: the response validator answered 500 (`/response must have required property 'title'`) and Pact reported `expected 200 but was 500`. With the current job, that verification is published and `can-i-deploy` is the step that fails, as in the rehearsal above. **Integration and E2E tests** failed on that branch too: integration passed (19/19, the repositories don't see API field names), and E2E failed on `GET /products` for the same 500.
 
-CI uses environments (`record-deployment`, `--to-environment`) rather than the tags of the local gate: a broker started fresh in each job has no `prod` tag, so `to=prod` would always answer unknown. Recording the provider's deployment first models the real order, provider before consumer. The limit: a broker that lives for one job only proves this commit's consumer and provider agree with each other. A persistent broker would check the consumer against what is actually deployed.
+CI uses environments (`record-deployment`, `--to-environment`) rather than the tags of the local gate. The limit: a broker that lives for one job can only answer for this commit's pair; checking a consumer against what is really deployed needs the persistent broker.
 
 ### Known gaps
 
 - **Idempotency-Key replays are kept in memory:** per process, lost on restart, and two simultaneous requests with the same key can both create an order. A table with a unique key on the idempotency key is the durable version.
-- **`app-v1-password` lives in three places:** `init.sql`, the testkit (which hands it to the test app through `DB_PASSWORD_FILE`), and the Grading setup's `secrets/db_password` for running the app itself. Rotating the dev password means changing all three.
+- **`app-v1-password` lives in two places:** `init.sql` (the testkit reads it from there and hands it to the test app through `DB_PASSWORD_FILE`) and the Grading setup's `secrets/db_password` for running the app itself.
 - **The provider version is the commit SHA,** which only identifies the code on a clean tree: uncommitted changes get verified and published under `HEAD`'s SHA.
-- **CI's broker lives for one job:** it proves this commit's consumer and provider agree, not that the consumer works with what is actually deployed.
+- **No persistent broker is configured yet:** until `PACT_BROKER_URL`/`PACT_BROKER_TOKEN` secrets point at one (PactFlow, or a self-hosted broker), CI checks only this commit's consumer/provider pair, not the consumer against what is actually in production.
 
 ## Configuration
 

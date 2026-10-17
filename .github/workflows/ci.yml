@@ -32,9 +32,12 @@ jobs:
     name: Contract (Pact)
     runs-on: ubuntu-24.04
     env:
-      # From secrets; without them the job uses the broker it starts itself.
-      PACT_BROKER_URL: ${{ secrets.PACT_BROKER_URL || 'http://localhost:21112' }}
+      # A persistent broker comes from secrets. Without them the job starts its
+      # own on 127.0.0.1 (not localhost: that can resolve to IPv6, and the broker
+      # listens on IPv4 only).
+      PACT_BROKER_URL: ${{ secrets.PACT_BROKER_URL || 'http://127.0.0.1:21112' }}
       PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+      PERSISTENT_BROKER: ${{ secrets.PACT_BROKER_URL != '' }}
       # The commit under test is both the consumer and the provider version.
       VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
       BRANCH: ${{ github.head_ref || github.ref_name }}
@@ -47,10 +50,10 @@ jobs:
       - run: npm ci
       - run: docker pull "$POSTGRES_IMAGE" && docker pull "$RYUK_IMAGE" && docker pull "$PACT_CLI_IMAGE"
 
-      # The same broker and database definition as locally, healthcheck included.
-      # It lives only for this job: it proves this commit's consumer and provider
-      # agree, not that the consumer works with what's really in production.
-      - run: docker compose up -d --wait pact-broker
+      # Without a persistent broker: the same definition as locally, healthcheck
+      # included. It lives for this job only, so it knows nothing about production.
+      - if: env.PERSISTENT_BROKER != 'true'
+        run: docker compose up -d --wait pact-broker
 
       - name: Consumer test (writes pacts/)
         run: npm run test:contract
@@ -62,25 +65,39 @@ jobs:
             "$PACT_CLI_IMAGE" pact-broker publish pacts \
             --consumer-app-version "$VERSION" --branch "$BRANCH"
 
+      # A failed verification is published, not fatal here: can-i-deploy reads it
+      # from the broker and is the step that says no.
       - name: Verify the provider and publish the result
         run: npm run verify:provider
+        continue-on-error: true
         env:
           PROVIDER_VERSION: ${{ env.VERSION }}
           PROVIDER_BRANCH: ${{ env.BRANCH }}
 
-      # The provider deploys first. The broker creates the production environment
-      # itself on first start.
-      - name: Record the provider deployment to production
+      # The gate: is this commit's consumer verified against this commit's
+      # provider? Exits 1 on a failed or missing verification, failing the job.
+      - name: can-i-deploy this commit's web-app with this commit's m-api
         run: |
           docker run --rm --network host \
             -e PACT_BROKER_BASE_URL="$PACT_BROKER_URL" ${PACT_BROKER_TOKEN:+-e PACT_BROKER_TOKEN} \
-            "$PACT_CLI_IMAGE" pact-broker record-deployment \
-            --pacticipant m-api --version "$VERSION" --environment production
+            "$PACT_CLI_IMAGE" pact-broker can-i-deploy \
+            --pacticipant web-app --version "$VERSION" --pacticipant m-api --version "$VERSION"
 
-      # Exits 1 unless the answer is yes, which fails the job.
+      # Only a persistent broker knows what is in production: check against the
+      # provider version recorded there, never one this run recorded itself.
       - name: can-i-deploy web-app to production
+        if: env.PERSISTENT_BROKER == 'true'
         run: |
           docker run --rm --network host \
             -e PACT_BROKER_BASE_URL="$PACT_BROKER_URL" ${PACT_BROKER_TOKEN:+-e PACT_BROKER_TOKEN} \
             "$PACT_CLI_IMAGE" pact-broker can-i-deploy \
             --pacticipant web-app --version "$VERSION" --to-environment production
+
+      # After the gates, and only for main: what merged to main is what deploys.
+      - name: Record the provider deployment to production
+        if: env.PERSISTENT_BROKER == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          docker run --rm --network host \
+            -e PACT_BROKER_BASE_URL="$PACT_BROKER_URL" ${PACT_BROKER_TOKEN:+-e PACT_BROKER_TOKEN} \
+            "$PACT_CLI_IMAGE" pact-broker record-deployment \
+            --pacticipant m-api --version "$VERSION" --environment production

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { PostgreSqlContainer } from '@testcontainers/postgresql';
 import { DataSource } from 'typeorm';
@@ -6,7 +7,11 @@ import { createSchemaDataSource } from '../../../src/schema-data-source.js';
 
 const IMAGE = 'postgres:16-alpine'; // keep in sync with db in docker-compose.yml
 const INIT_SQL = fileURLToPath(new URL('../../../../init.sql', import.meta.url));
-const APP_USER_PASSWORD = 'app-v1-password'; // set by init.sql
+// Read from init.sql, which the container runs, so the two can't drift.
+const APP_USER_PASSWORD = /CREATE ROLE app_user LOGIN PASSWORD '([^']+)'/.exec(readFileSync(INIT_SQL, 'utf8'))?.[1];
+if (!APP_USER_PASSWORD) {
+  throw new Error(`No "CREATE ROLE app_user LOGIN PASSWORD '…'" in ${INIT_SQL}`);
+}
 
 export interface TestDatabase {
   // Schema owner: migrations and reset() only.
