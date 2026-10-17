@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Headers, Param, Post, Query } from '@nestjs/common';
-import { OrdersService } from './orders.service.js';
+import { type CreateOrder, OrdersService } from './orders.service.js';
 
 @Controller('orders')
 export class OrdersController {
@@ -12,11 +12,11 @@ export class OrdersController {
 
   @Get(':id')
   findOne(@Param('id') id: string) {
-    return this.ordersService.findById(Number(id));
+    return this.ordersService.getById(Number(id));
   }
 
   @Post()
-  create(@Headers('idempotency-key') idempotencyKey: string, @Body() body: { items: { product_id: number; quantity: number }[] }) {
+  create(@Headers('idempotency-key') idempotencyKey: string, @Body() body: CreateOrder) {
     return this.ordersService.create(idempotencyKey, body);
   }
 }

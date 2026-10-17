@@ -72,7 +72,7 @@ async function sanityCheck(productId: string, brokeUserId: string, before: Count
   console.log('\nSanity check — broke user buys 1:');
   let rejection: unknown;
   try {
-    await checkout(dataSource, { userId: brokeUserId, productId, quantity: 1 });
+    await checkout(dataSource, { userId: brokeUserId, items: [{ productId, quantity: 1 }] });
   } catch (error) {
     rejection = error;
   }
@@ -99,7 +99,7 @@ try {
   let retries = 0;
   const results = await Promise.all(
     Array.from({ length: ATTEMPTS }, () =>
-      checkout(dataSource, { userId: buyer.id, productId: product.id, quantity: 1 }, { onRetry: () => retries++ }).then(
+      checkout(dataSource, { userId: buyer.id, items: [{ productId: product.id, quantity: 1 }] }, { onRetry: () => retries++ }).then(
         () => ({ ok: true as const }),
         (reason: unknown) => ({ ok: false as const, reason }),
       ),
