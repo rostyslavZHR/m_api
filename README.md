@@ -11,7 +11,7 @@ The DB scripts normally load credentials from the local store through `scripts/w
 ```bash
 docker compose up -d --wait
 export MIGRATIONS_DB_URL=postgres://admin:admin-bootstrap-only@localhost:21110/shop
-export SKIP_VAULT=1    # the grader has no access to the store
+export SKIP_VAULT=1
 
 npm ci && npx tsc --noEmit
 npm run build
@@ -22,9 +22,14 @@ docker compose exec db psql -U admin -d shop -Atc \
   "SELECT (SELECT count(*) FROM users), (SELECT count(*) FROM products), (SELECT count(*) FROM orders), (SELECT count(*) FROM order_items)"
 npm run demo:nplus1
 npm run report
+npm run demo:race
+npm run demo:workers
+npm run demo:retry
 ```
 
-The row counts are `10|10|60|120` after the first seed and after the second.
+The row counts are `11|11|60|120` after the first seed and after the second — 10 users plus the underfunded one, 10 products plus the race product. Each demo prints its checks and exits non-zero if any fails; each resets its own preconditions, so it can be rerun.
+
+Optional: `DEMO_COMPARE=1 npm run demo:workers` and `DEMO_COMPARE=1 npm run demo:retry` add the contrast runs — the same work without `SKIP LOCKED`, and under `READ COMMITTED` — see [Concurrency](#concurrency).
 
 ## TypeORM data layer
 
@@ -34,9 +39,12 @@ The HW#12 schema as entities in [src/entities/](src/entities/), created by the m
 |---|---|
 | `npm run migrate` / `migrate:show` / `migrate:revert` | apply, list, undo migrations |
 | `npm run migrate:generate -- src/migrations/Name` | diff entities against the live DB into a new migration |
-| `npm run seed` | deterministic, idempotent seed: 10 users, 10 products, 60 orders, 120 lines |
+| `npm run seed` | deterministic, idempotent seed: 10 funded users + 1 underfunded, 10 products + the race product, 60 orders, 120 lines |
 | `npm run demo:nplus1` | N+1 before/after, see [N+1](#n1) |
 | `npm run report` | revenue per product via the query builder, see [Report](#report) |
+| `npm run demo:race` | 50 concurrent checkouts for 10 units, see [Concurrency](#concurrency) |
+| `npm run demo:workers` | 4 workers drain the job queue with `SKIP LOCKED` |
+| `npm run demo:retry` | a forced `40001`, caught and retried |
 
 All of them read `dist/`, so run `npm run build` first.
 
@@ -56,6 +64,7 @@ All of them read `dist/`, so run `npm run build` first.
 |---|---|
 | `Init` | generated: every table, constraint and index. Hand-written inside it: `products_lower_name_idx` (an index on `lower(name)`) and its `CREATE STATISTICS`, which TypeORM can't describe, and `CREATE TABLE IF NOT EXISTS typeorm_metadata`, which the generator relies on for `search_vector` but doesn't emit itself |
 | `MoneyToMinorUnits` | hand-written: renames `price`/`total`/`unit_price` to `*_cents` and converts them from `numeric(12,2)` to `bigint` cents in place (`round(x * 100)`). The generator sees a rename as `DROP` + `ADD`, which would lose every price. `down()` converts back exactly |
+| `StockBalanceJobs` | generated, then simplified: `in_stock` boolean → `stock integer` (replaced, not converted — the generator wrote it as rename + drop + add), `users.balance_cents`, the `jobs` table with `jobs_pending_idx … WHERE status = 'new'`, and `CHECK (stock >= 0)` / `CHECK (balance_cents >= 0)` |
 
 `Init` is never edited once it has run anywhere; a schema change is a new migration.
 
@@ -201,6 +210,25 @@ The report uses `.withDeleted()`: revenue is history, and a soft-deleted product
 
 Revenue comes back as `revenue_cents`, in cents.
 
+## Concurrency
+
+Checkout ([src/checkout/checkout.ts](src/checkout/checkout.ts)), the job workers ([src/workers/job-worker.ts](src/workers/job-worker.ts)) and the retry wrapper ([src/common/transaction-retry.ts](src/common/transaction-retry.ts)), each proved by a demo with a contrast run:
+
+| Demo | With the fix | Without |
+|---|---|---|
+| `demo:race` — 50 checkouts, stock 10 | 10 of 50 succeed, stock 0, no negative rows, 0 retries; balance exact, no orphan orders | — the guarded update is the only path |
+| `demo:workers` — 4 workers, 20 jobs × 100 ms | 560 ms vs 2000 ms sequential, `w1=5 w2=5 w3=5 w4=5`, 0 processed twice | without `SKIP LOCKED`: 2131 ms, `w3=0` — correct, but no faster than one worker |
+| `demo:retry` — two read-modify-writes on one balance | `REPEATABLE READ`: one `40001` caught on B and retried, final 102000 as expected | `READ COMMITTED`: 97000, no error — a lost update |
+
+**Atomic `UPDATE` rather than `SELECT … FOR UPDATE`.** The whole decision — is there enough stock, is the balance enough — fits in one SQL expression, so the check and the change are a single statement: `UPDATE products SET stock = stock - $1 WHERE id = $2 AND stock >= $1 AND deleted_at IS NULL RETURNING price_cents, name`. There's no window between reading and writing for another transaction to slip into. Under `READ COMMITTED` a writer that had to wait for the row re-checks the `WHERE` against the newly committed version, so the 11th buyer sees `stock = 0` and matches nothing. The row lock is held only from the update to the commit. What makes the guard safe is checking the affected-row count: zero rows isn't an error from Postgres, it's the guard refusing, and an unchecked refusal would look like a success. `FOR UPDATE` would earn its place only if the decision needed reads or logic that don't fit in one expression.
+
+**Why the retry catches only `40001` and `40P01`.** Those two mean Postgres rolled your transaction back because of another one — a serialization conflict or a deadlock — and running the whole transaction again will most likely succeed. Every other error either fails identically the next time (a `CHECK` or unique violation) or isn't safe to repeat blindly, like a connection lost during `COMMIT`, where you can't know whether it committed.
+
+**Other choices a reviewer should find:**
+- **Lock order: stock before balance, everywhere.** With one order, two checkouts can never wait on each other in a cycle, so they can't deadlock.
+- **The receipt job is inserted in the checkout transaction.** It commits with the order or not at all, and the receipt is sent later by a worker — so a retried checkout can't send two.
+- **A worker holds its transaction while it works.** If it crashes mid-job, the transaction rolls back, the row lock disappears, and the job is `new` again for another worker. The claim is `ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED` — the `LIMIT` matters, because TypeORM's `getOne()` doesn't add one.
+
 ## Configuration
 
 Environment variables are validated on startup by [src/config/env.schema.ts](src/config/env.schema.ts) via a zod schema, wired into `ConfigModule.forRoot({ validate })` in [src/app.module.ts](src/app.module.ts). A missing or malformed variable makes the process exit immediately with a non-zero code and a message naming every broken variable — never a runtime failure on the first request.
@@ -305,11 +333,16 @@ The multi-stage [Dockerfile](Dockerfile) only copies `dist/`, `package*.json`, `
 | `src/db/` | `DbModule`/`DbService`/`DbController` — pg pool factory, `/db` health query |
 | `src/health-check/` | dependency-free `/health` module (`{ uptimeSec }`) |
 | `src/entities/` | TypeORM entities for the HW#12 schema; `index.ts` exports them and the list the DataSource registers |
-| `src/migrations/` | the only schema source: `Init` (generated, hand-written parts marked) and `MoneyToMinorUnits` (hand-written) |
+| `src/migrations/` | the only schema source: `Init` (generated, hand-written parts marked), `MoneyToMinorUnits` (hand-written), `StockBalanceJobs` (generated, simplified) |
 | `src/data-source.ts` | DataSource for the CLI and DB scripts: `synchronize: false`, URL from `MIGRATIONS_DB_URL` |
 | `src/seed.ts` | deterministic, idempotent seed |
 | `src/demo-nplus1.ts`, `src/common/query-count-logger.ts` | N+1 demo and the logger that counts its queries |
 | `src/report.ts`, `src/reports/` | report runner and the query-builder report itself |
+| `src/seed-fixtures.ts` | seeded rows the demos look up: the race product, its buyer, the underfunded user, the retry subject, the seeded balance |
+| `src/checkout/` | `checkout()` — one `READ COMMITTED` transaction of guarded atomic updates — and its typed rejections |
+| `src/common/transaction-retry.ts` | `inTransactionWithRetry`: retries the whole transaction on `40001`/`40P01`, bounded, full jitter, `label` + `onRetry` |
+| `src/workers/` | the job worker: claim with `SKIP LOCKED`, work and complete in one transaction |
+| `src/demo-race.ts`, `src/demo-workers.ts`, `src/demo-retry.ts` | the three concurrency demos |
 | `scripts/with-secrets.sh` | loads `.secrets/infisical.env` and runs the command; `SKIP_VAULT=1` skips the store |
 | `.env.example` | env var contract, kept in sync with the schema via `npm run check:env` |
 | `scripts/check-env-example.js` | diffs `.env.example` against the schema in both directions |
