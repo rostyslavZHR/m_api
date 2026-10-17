@@ -1,6 +1,6 @@
 import type { EntityManager } from 'typeorm';
 import { inTransactionWithRetry, type IsolationLevel, type RetryInfo } from './common/transaction-retry.js';
-import { dataSource } from './data-source.js';
+import { runtimeDataSource as dataSource } from './runtime-data-source.js';
 import { UserEntity } from './entities/index.js';
 import { RETRY_START_BALANCE_CENTS, RETRY_USER_EMAIL } from './seed-fixtures.js';
 
