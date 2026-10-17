@@ -11,18 +11,18 @@
 # a user field before the command (e.g. `0 3 * * * deploy cd …`).
 # Adjust /opt/m_api below to the repo's absolute path on install.
 #
-# Secrets: backup.sh needs none today, only DB_URL (config, not in the vault).
-# It still runs through with-secrets.sh, because the S3 upload (#26) will need
-# keys from the vault. An unattended job can't do an interactive vault login, so
-# production needs a machine identity token for Infisical; that isn't set up yet.
+# Secrets: backup.sh connects with MIGRATIONS_DB_URL (the schema owner, directly
+# to Postgres), which with-secrets.sh loads from the vault; the S3 upload (#26)
+# will need keys from it too. An unattended job can't do an interactive vault
+# login, so production needs a machine identity token for Infisical; that isn't
+# set up yet.
 #
 # Keep % out of the command line: cron turns it into a newline. The date is
 # built inside backup.sh for that reason.
 
-# PATH and DB_URL are set on the command, not as NAME=value lines: appended to
-# an existing crontab, those lines would apply to every job below them too.
-# PATH: Docker Desktop for Mac installs docker in /usr/local/bin; most Linux in
-# /usr/bin. DB_URL: only the database name is used; backup.sh connects inside
-# the db container. mkdir comes first: the log redirect needs backups/ before
-# backup.sh gets to create it, and on a fresh install it doesn't exist yet.
-0 3 * * * cd /opt/m_api && mkdir -p backups && PATH=/usr/local/bin:/usr/bin:/bin DB_URL=postgres://app_user@localhost:21111/shop bash scripts/with-secrets.sh prod bash scripts/backup.sh >> backups/backup.log 2>&1
+# PATH is set on the command, not as a NAME=value line: appended to an existing
+# crontab, that line would apply to every job below it too. Docker Desktop for
+# Mac installs docker in /usr/local/bin; most Linux in /usr/bin. mkdir comes
+# first: the log redirect needs backups/ before backup.sh gets to create it,
+# and on a fresh install it doesn't exist yet.
+0 3 * * * cd /opt/m_api && mkdir -p backups && PATH=/usr/local/bin:/usr/bin:/bin bash scripts/with-secrets.sh prod bash scripts/backup.sh >> backups/backup.log 2>&1

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Restores the newest backups/shop_*.dump into a brand-new Postgres container,
-# compares the restored orders against the dump's .check, and prints MATCH
+# compares every table's row count (and orders' total) with the dump's .check, then prints MATCH
 # (exit 0) or MISMATCH (exit 1). The container and its volume are removed on
 # every exit, so the next run starts from nothing again.
 # Usage: bash scripts/restore-drill.sh   (reads files only, no env vars needed)
@@ -32,11 +32,17 @@ dump="${dumps[${#dumps[@]}-1]}"
 [ -f "$dump.check" ] || fail "no control values for this dump ($dump.check is missing)"
 expected="$(cat "$dump.check")"
 
-# The exact image the running db uses, so a version bump in compose can't
-# leave the drill restoring into a different Postgres.
-db_id="$(docker compose ps -q db)"
-[ -n "$db_id" ] || fail "the db service isn't running: the drill takes its image from it"
-image="$(docker inspect --format '{{.Config.Image}}' "$db_id")"
+# One "table rows" line per table, plus public.orders.total_cents (backup.sh).
+# An older .check (a single count|sum line) can't be compared table by table.
+grep -qvE '^[a-z_.]+ [0-9]+$' "$dump.check" && fail "$dump.check is in an old format: rerun backup.sh"
+
+# The Postgres major version the dump came from, read from its header (plain
+# text near the start: the database name, then the server's and pg_dump's
+# versions). The drill restores into that same major version and needs no
+# running db, which is exactly what's missing when a restore is needed.
+major="$(head -c 256 "$dump" | LC_ALL=C grep -aoE '[0-9]+\.[0-9]+' | head -1 | cut -d. -f1)" || true
+[ -n "$major" ] || fail "can't read the Postgres version from $dump's header"
+image="postgres:${major}-alpine"
 
 # A run killed with kill -9 never reaches its trap: sweep what it left.
 leftovers="$(docker ps -aq --filter "label=$LABEL")"
@@ -50,7 +56,8 @@ fi
 # one for the image's data directory; rm -v (and --rm) delete it with the
 # container. Unique name per run, no published port, throwaway password.
 name="m_api-drill-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-trap 'docker rm -f -v "$name" >/dev/null 2>&1 || true' EXIT
+# Keeps the exit status: without it, the cleanup's own status replaces it.
+trap 'status=$?; docker rm -f -v "$name" >/dev/null 2>&1; exit $status' EXIT
 docker run -d --rm --name "$name" --label "$LABEL" \
   -e POSTGRES_USER=admin -e POSTGRES_DB=shop -e POSTGRES_PASSWORD=drill-throwaway \
   "$image" >/dev/null
@@ -84,17 +91,25 @@ if ! docker exec -i "$name" pg_restore -U admin -d shop --no-owner --single-tran
 fi
 restore_ms=$(( $(now_ms) - restore_started_ms ))
 
-actual="$(docker exec "$name" psql -U admin -d shop -v ON_ERROR_STOP=1 -tAc \
-  "SELECT count(*) || '|' || sum(total_cents) FROM orders")"
+# The same values, measured on the restored database, in the .check's format.
+# (if, not case: bash 3.2 can't parse a case pattern's ")" inside $( ).)
+actual="$(while read -r key _; do
+  if [[ "$key" == *.total_cents ]]; then
+    query="SELECT coalesce(sum(total_cents), 0) FROM ${key%.total_cents}"
+  else
+    query="SELECT count(*) FROM $key"
+  fi
+  echo "$key $(docker exec "$name" psql -U admin -d shop -v ON_ERROR_STOP=1 -XtAc "$query")"
+done < "$dump.check")"
 total_ms=$(( $(now_ms) - started_ms ))
 
 echo "date:     $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "dump:     $(basename "$dump") ($(wc -c < "$dump" | tr -d ' ') bytes)"
-echo "image:    $image"
+echo "image:    $image (from the dump's header)"
 echo "restore:  ${restore_ms} ms"
 echo "total:    ${total_ms} ms"
-echo "expected: $expected (orders count|sum total_cents, from $(basename "$dump").check)"
-echo "restored: $actual"
+echo "checked:  $(wc -l < "$dump.check" | tr -d ' ') values from $(basename "$dump").check (expected → restored)"
+paste -d ' ' <(echo "$expected") <(echo "$actual" | cut -d ' ' -f 2) | awk '{ printf "  %-28s %12s → %s%s\n", $1, $2, $3, ($2 == $3 ? "" : "   ✗") }'
 if [ "$actual" = "$expected" ]; then
   echo "MATCH"
 else

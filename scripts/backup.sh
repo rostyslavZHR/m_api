@@ -1,81 +1,91 @@
 #!/usr/bin/env bash
-# Dumps the shop database to backups/shop_<UTC timestamp>.dump (pg_dump -Fc),
-# writes control values next to it (<dump>.check), and prints the dump's path
-# as the last line. Any failure exits non-zero and leaves no dump behind.
-# Usage: export DB_URL=…; bash scripts/backup.sh
+# Dumps the database in MIGRATIONS_DB_URL to backups/shop_<UTC timestamp>.dump
+# (pg_dump -Fc), writes control values taken from the dump itself next to it
+# (<dump>.check), and prints the dump's path as the last line. Any failure
+# exits non-zero and leaves no dump behind.
+# Usage: export MIGRATIONS_DB_URL=…; bash scripts/backup.sh
 set -euo pipefail
 
 # Dumps hold real data: files are readable by the owner only.
 umask 077
 
-# cron calls this from anywhere; compose needs the repo root.
+# cron calls this from anywhere.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-# Only the database name is taken from the URL. Host, port, user and password
-# are ignored: the dump runs inside the db container as its superuser, over the
-# local socket, so no credentials appear here.
-url="${DB_URL:-${DATABASE_URL:-}}"
-if [ -z "$url" ]; then
-  echo "backup: neither DB_URL nor DATABASE_URL is set" >&2
+fail() {
+  echo "backup: $*" >&2
   exit 1
-fi
-db="${url##*/}"
-db="${db%%\?*}"
-if [ -z "$db" ]; then
-  echo "backup: no database name in the connection URL" >&2
-  exit 1
-fi
-
-# Runs psql as the container's superuser. Single quotes: the container's shell
-# expands $POSTGRES_USER, not this one. The database name goes in as $1.
-psql_in_db() {
-  docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$1" -v ON_ERROR_STOP=1 -tAc "$2"' sh "$db" "$1"
 }
 
-if ! docker compose exec -T db pg_isready -q; then
-  echo "backup: can't reach the db container (is 'docker compose up' running?)" >&2
-  exit 1
-fi
+# The schema owner's direct connection, not DB_URL: app_user can't read the
+# pgbouncer schema, and pg_dump needs a session that PgBouncer's transaction
+# mode doesn't keep. Host, port, user and password all come from the URL, so
+# the database can live anywhere this machine can reach.
+url="${MIGRATIONS_DB_URL:-}"
+[ -n "$url" ] || fail "MIGRATIONS_DB_URL is not set (the schema owner's direct connection)"
 
-if [ "$(psql_in_db "SELECT to_regclass('public.orders') IS NOT NULL")" != "t" ] ||
-   [ "$(psql_in_db "SELECT EXISTS (SELECT 1 FROM orders)")" != "t" ]; then
-  echo "backup: database is empty: run migrate and seed first" >&2
-  exit 1
+# The Postgres tools run in a container, where localhost is the container
+# itself: a local URL is pointed at the Docker host instead.
+container_url="$(printf '%s' "$url" | sed -E 's#@(localhost|127\.0\.0\.1)([:/])#@host.docker.internal\2#')"
+pg() {
+  docker run --rm -i --add-host host.docker.internal:host-gateway "$@"
+}
+
+# Any psql can ask the server its version; pg_dump then has to be at least the
+# server's major version, so every later step uses exactly that one.
+server_version="$(pg postgres:16-alpine psql "$container_url" -XtAc 'SHOW server_version_num' 2>/dev/null)" ||
+  fail "can't connect to the database in MIGRATIONS_DB_URL"
+image="postgres:$((server_version / 10000))-alpine"
+
+psql_q() {
+  pg "$image" psql "$container_url" -X -v ON_ERROR_STOP=1 -tAc "$1"
+}
+
+if [ "$(psql_q "SELECT to_regclass('public.orders') IS NOT NULL")" != "t" ] ||
+   [ "$(psql_q "SELECT EXISTS (SELECT 1 FROM orders)")" != "t" ]; then
+  fail "database is empty: run migrate and seed first"
 fi
 
 mkdir -p backups
 name="shop_$(date -u +%Y%m%dT%H%M%SZ)"
 dump="backups/$name.dump"
-if [ -e "$dump" ]; then
-  echo "backup: $dump already exists" >&2
-  exit 1
-fi
+[ ! -e "$dump" ] || fail "$dump already exists"
 
 # Written under temporary names in the same directory, renamed only after
-# pg_dump succeeds: a failed run leaves nothing that looks like a backup.
+# everything succeeded: a failed run leaves nothing that looks like a backup.
 tmp_dump="$(mktemp "backups/.$name.dump.XXXXXX")"
 tmp_check="$(mktemp "backups/.$name.check.XXXXXX")"
 trap 'rm -f "$tmp_dump" "$tmp_check"' EXIT
 
-# Phase F compares the restored database against these, not the live one.
-# They're read just before the dump, so writes in between would make them
-# differ; nothing writes to shop while a backup runs here.
-psql_in_db "SELECT count(*) || '|' || sum(total_cents) FROM orders" > "$tmp_check"
+# No -t: a terminal's line handling can corrupt binary output.
+pg "$image" pg_dump -Fc "$container_url" > "$tmp_dump"
+[ -s "$tmp_dump" ] || fail "pg_dump produced an empty file"
 
-# -T: no terminal. A terminal's line handling can corrupt binary output, and
-# pg_restore then rejects the file. pg_dump is the container's own Postgres 16.
-docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" -d "$1" -Fc' sh "$db" > "$tmp_dump"
-
-if [ ! -s "$tmp_dump" ]; then
-  echo "backup: pg_dump produced an empty file" >&2
-  exit 1
-fi
+# Control values read back from the dump's own data, so they describe exactly
+# its snapshot: one line per table with its row count, plus the sum of
+# orders.total_cents. The restore drill compares the restored database to them.
+pg "$image" pg_restore --data-only -f - < "$tmp_dump" | awk '
+  /^COPY / {
+    table = $2; rows = 0; sum = 0; money = 0
+    n = split(substr($0, index($0, "(") + 1), cols, ", ")
+    for (i = 1; i <= n; i++) { sub(/\).*/, "", cols[i]); if (cols[i] == "total_cents") money = i }
+    next
+  }
+  table != "" && $0 == "\\." {
+    print table, rows
+    if (table == "public.orders") printf "%s.total_cents %.0f\n", table, sum
+    table = ""; next
+  }
+  table != "" { rows++; if (money) { split($0, fields, "\t"); sum += fields[money] } }
+' > "$tmp_check"
+grep -q '^public\.orders ' "$tmp_check" || fail "no orders data in the dump: control values incomplete"
 
 mv "$tmp_check" "$dump.check"
 mv "$tmp_dump" "$dump"
 trap - EXIT
 
-echo "size: $(wc -c < "$dump" | tr -d ' ') bytes"
-echo "check (orders count|sum total_cents): $(cat "$dump.check")"
+echo "size: $(wc -c < "$dump" | tr -d ' ') bytes, Postgres ${image#postgres:}"
+echo "check ($dump.check):"
+sed 's/^/  /' "$dump.check"
 echo "$ROOT/$dump"
