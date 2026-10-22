@@ -27,3 +27,9 @@ spec.json
 
 # Documentation
 docs
+
+# Database dumps (scripts/backup.sh) hold real data
+backups
+
+# Compiled tests (npm run build:test)
+/dist-test

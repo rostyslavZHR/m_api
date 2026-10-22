@@ -1,0 +1,103 @@
+name: CI
+
+# Pull requests run the checks; push only for main, so a push to a PR branch
+# doesn't run everything twice.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # Pre-pulled, so a test's 60 s timeout isn't spent downloading.
+  POSTGRES_IMAGE: postgres:16-alpine
+  RYUK_IMAGE: testcontainers/ryuk:0.14.0
+  PACT_CLI_IMAGE: pactfoundation/pact-cli:1.5.0.5
+
+jobs:
+  tests:
+    name: Integration and E2E tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24 # Testcontainers needs Node >= 22.22
+          cache: npm
+      - run: npm ci
+      - run: docker pull "$POSTGRES_IMAGE" && docker pull "$RYUK_IMAGE"
+      - run: npm run test:integration
+      - run: npm run test:e2e
+
+  contract:
+    name: Contract (Pact)
+    runs-on: ubuntu-24.04
+    env:
+      # A persistent broker comes from secrets. Without them the job starts its
+      # own on 127.0.0.1 (not localhost: that can resolve to IPv6, and the broker
+      # listens on IPv4 only).
+      PACT_BROKER_URL: ${{ secrets.PACT_BROKER_URL || 'http://127.0.0.1:21112' }}
+      PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+      PERSISTENT_BROKER: ${{ secrets.PACT_BROKER_URL != '' }}
+      # The commit under test is both the consumer and the provider version.
+      VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
+      BRANCH: ${{ github.head_ref || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: docker pull "$POSTGRES_IMAGE" && docker pull "$RYUK_IMAGE" && docker pull "$PACT_CLI_IMAGE"
+
+      # Without a persistent broker: the same definition as locally, healthcheck
+      # included. It lives for this job only, so it knows nothing about production.
+      - if: env.PERSISTENT_BROKER != 'true'
+        run: docker compose up -d --wait pact-broker
+
+      - name: Consumer test (writes pacts/)
+        run: npm run test:contract
+
+      - name: Publish the pact
+        run: |
+          docker run --rm --network host -v "$PWD":/work -w /work \
+            -e PACT_BROKER_BASE_URL="$PACT_BROKER_URL" ${PACT_BROKER_TOKEN:+-e PACT_BROKER_TOKEN} \
+            "$PACT_CLI_IMAGE" pact-broker publish pacts \
+            --consumer-app-version "$VERSION" --branch "$BRANCH"
+
+      # A failed verification is published, not fatal here: can-i-deploy reads it
+      # from the broker and is the step that says no.
+      - name: Verify the provider and publish the result
+        run: npm run verify:provider
+        continue-on-error: true
+        env:
+          PROVIDER_VERSION: ${{ env.VERSION }}
+          PROVIDER_BRANCH: ${{ env.BRANCH }}
+
+      # The gate: is this commit's consumer verified against this commit's
+      # provider? Exits 1 on a failed or missing verification, failing the job.
+      - name: can-i-deploy this commit's web-app with this commit's m-api
+        run: |
+          docker run --rm --network host \
+            -e PACT_BROKER_BASE_URL="$PACT_BROKER_URL" ${PACT_BROKER_TOKEN:+-e PACT_BROKER_TOKEN} \
+            "$PACT_CLI_IMAGE" pact-broker can-i-deploy \
+            --pacticipant web-app --version "$VERSION" --pacticipant m-api --version "$VERSION"
+
+      # Only a persistent broker knows what is in production: check against the
+      # provider version recorded there, never one this run recorded itself.
+      - name: can-i-deploy web-app to production
+        if: env.PERSISTENT_BROKER == 'true'
+        run: |
+          docker run --rm --network host \
+            -e PACT_BROKER_BASE_URL="$PACT_BROKER_URL" ${PACT_BROKER_TOKEN:+-e PACT_BROKER_TOKEN} \
+            "$PACT_CLI_IMAGE" pact-broker can-i-deploy \
+            --pacticipant web-app --version "$VERSION" --to-environment production
+
+      # After the gates, and only for main: what merged to main is what deploys.
+      - name: Record the provider deployment to production
+        if: env.PERSISTENT_BROKER == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          docker run --rm --network host \
+            -e PACT_BROKER_BASE_URL="$PACT_BROKER_URL" ${PACT_BROKER_TOKEN:+-e PACT_BROKER_TOKEN} \
+            "$PACT_CLI_IMAGE" pact-broker record-deployment \
+            --pacticipant m-api --version "$VERSION" --environment production

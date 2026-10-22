@@ -12,9 +12,23 @@
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main",
     "lint": "oxlint --type-aware src/ test/",
-    "test": "vitest run",
-    "test:e2e": "vitest run --config ./vitest.config.e2e.ts",
-    "check:env": "node scripts/check-env-example.js"
+    "test": "npm run build:test && node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "test:e2e": "npm run build:test && node --experimental-vm-modules node_modules/jest/bin/jest.js dist-test/test/e2e",
+    "check:env": "node scripts/check-env-example.js",
+    "migrate": "bash scripts/with-secrets.sh dev typeorm migration:run -d dist/data-source.js",
+    "migrate:show": "bash scripts/with-secrets.sh dev typeorm migration:show -d dist/data-source.js",
+    "migrate:revert": "bash scripts/with-secrets.sh dev typeorm migration:revert -d dist/data-source.js",
+    "migrate:generate": "bash scripts/with-secrets.sh dev typeorm migration:generate -d dist/data-source.js",
+    "seed": "bash scripts/with-secrets.sh dev node dist/seed.js",
+    "demo:nplus1": "bash scripts/with-secrets.sh dev node dist/demo-nplus1.js",
+    "report": "bash scripts/with-secrets.sh dev node dist/report.js",
+    "demo:race": "node --env-file-if-exists=.env dist/demo-race.js",
+    "demo:workers": "node --env-file-if-exists=.env dist/demo-workers.js",
+    "demo:retry": "node --env-file-if-exists=.env dist/demo-retry.js",
+    "build:test": "rm -rf dist-test && tsc -p tsconfig.test.json",
+    "test:integration": "npm run build:test && node --experimental-vm-modules node_modules/jest/bin/jest.js dist-test/test/integration",
+    "test:contract": "npm run build:test && node --experimental-vm-modules node_modules/jest/bin/jest.js dist-test/test/contract",
+    "verify:provider": "npm run build:test && node dist-test/test/contract/verify-provider.js"
   },
   "dependencies": {
     "@nestjs/common": "^12.0.3",
@@ -25,23 +39,25 @@
     "pg": "^8.23.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
+    "typeorm": "^1.1.1",
     "zod": "^4.6.5"
   },
   "devDependencies": {
     "@nestjs/cli": "^12.0.0",
     "@nestjs/schematics": "^12.0.0",
     "@nestjs/testing": "^12.0.1",
+    "@pact-foundation/pact": "^17.1.4",
+    "@testcontainers/postgresql": "^12.2.0",
     "@types/express": "^5.0.0",
+    "@types/jest": "^30.0.0",
     "@types/node": "^24.0.0",
     "@types/pg": "^8.23.1",
     "@types/supertest": "^7.0.0",
-    "@vitest/coverage-v8": "^4.1.2",
+    "jest": "^30.5.2",
     "oxlint": "^1.58.0",
     "prettier": "^3.4.2",
     "source-map-support": "^0.5.21",
     "supertest": "^7.0.0",
-    "typescript": "^6.0.2",
-    "vite-tsconfig-paths": "^5.1.4",
-    "vitest": "^4.1.2"
+    "typescript": "^6.0.2"
   }
 }

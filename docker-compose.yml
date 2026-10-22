@@ -17,5 +17,65 @@ services:
       timeout: 2s
       retries: 15
 
+  # The app's runtime connection (DB_URL) goes through PgBouncer; migrations and
+  # admin work stay on db directly. The image never overwrites a mounted ini, so
+  # its environment variables (POOL_MODE etc.) would do nothing — the ini is it.
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.26.0-p0
+    ports:
+      - "21111:6432"                                       # container side = listen_port in the ini
+    volumes:
+      # The directory, not the two files: editors and sed -i replace a file with a
+      # new one, and a single-file bind mount keeps showing the container the old
+      # one. With the directory mounted, edit the ini, then RELOAD on the console.
+      - ./pgbouncer:/etc/pgbouncer:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      # A real query through the pool: it reaches Postgres, so it fails when db is
+      # down. pg_isready alone would only prove PgBouncer itself is listening.
+      # Right for compose --wait. In Kubernetes (#28) this check is the readiness
+      # probe; liveness checks PgBouncer alone, or a db outage restarts it for nothing.
+      test: ["CMD-SHELL", "PGPASSWORD=pgbouncer-auth-dev-only psql -h 127.0.0.1 -p 6432 -U pgbouncer_auth -d shop -tAc 'SELECT 1' | grep -q 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # The Pact broker keeps contracts and verification results in its own Postgres,
+  # never the app's db. No published port: only the broker talks to it.
+  pact-broker-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: pact_broker
+      POSTGRES_PASSWORD: pact-broker-dev-only
+      POSTGRES_DB: pact_broker
+    volumes:
+      - pact-broker-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pact_broker -d pact_broker"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  # Local only, without authentication: anyone who can reach 21112 can publish.
+  pact-broker:
+    image: pactfoundation/pact-broker:2.142.0-pactbroker2.120.0
+    ports:
+      - "21112:9292"
+    environment:
+      PACT_BROKER_DATABASE_URL: postgres://pact_broker:pact-broker-dev-only@pact-broker-db/pact_broker
+    depends_on:
+      pact-broker-db:
+        condition: service_healthy
+    healthcheck:
+      # 127.0.0.1, not localhost: inside the container localhost can resolve to
+      # IPv6, and the broker listens on IPv4 only.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9292/diagnostic/status/heartbeat"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
 volumes:
   pgdata:
+  pact-broker-data:

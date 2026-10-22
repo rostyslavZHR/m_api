@@ -154,6 +154,12 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '409':
+          description: A product is unavailable or short of stock, or the user's balance doesn't cover the total
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
         '422':
           description: The Idempotency-Key was already used with a different request body
           content:
@@ -232,6 +238,7 @@ components:
             - new
             - paid
             - shipped
+            - cancelled
         created_at:
           type: string
           format: date-time
@@ -246,12 +253,16 @@ components:
       type: object
       additionalProperties: false
       properties:
+        user_id:
+          type: integer
+          description: The user who places the order and is charged for it.
         items:
           type: array
           items:
             $ref: '#/components/schemas/OrderItem'
           minItems: 1
       required:
+        - user_id
         - items
 
     OrderPage:
