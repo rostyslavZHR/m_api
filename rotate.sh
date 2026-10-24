@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Rotate app_user's password without restarting the app.
-#
+# test
 # Order matters:
 #   1. ALTER ROLE in the DB (new password becomes the source of truth);
 #   2. write the secret file immediately after (new connections pick up
