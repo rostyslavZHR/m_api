@@ -157,13 +157,13 @@ export class OrdersService {
         );
       }
 
-      const isStatusUpdateSucceded = await orders.updateStatus({
+      const updated = await orders.updateStatus({
         orderId: order.id,
         from: order.status,
         to,
       });
 
-      if (!isStatusUpdateSucceded) {
+      if (!updated) {
         throw new ConflictException(
           `Order ${id} changed concurrently; read it and retry.`,
         );

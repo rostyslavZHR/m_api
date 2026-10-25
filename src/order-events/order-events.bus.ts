@@ -2,8 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { filter, Observable, Subject } from 'rxjs';
 import { OrderStatusEvent } from './order-status-event.js';
 
-// One in-process channel for commited status changes. A plain Subject, not a
-// replaying one: late subsribers get history from order_events, not from memory.
+// One in-process channel for committed status changes. A plain Subject, not a
+// replaying one: late subscribers get history from order_events, not from memory.
 @Injectable()
 export class OrderEventsBus {
   private readonly events = new Subject<OrderStatusEvent>();

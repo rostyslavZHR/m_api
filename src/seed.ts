@@ -1,6 +1,13 @@
 import { In, type EntityManager } from 'typeorm';
 import { dataSource } from './data-source.js';
-import { OrderEntity, OrderItemEntity, ProductEntity, UserEntity, type OrderStatus } from './entities/index.js';
+import {
+  OrderEntity,
+  OrderEventEntity,
+  OrderItemEntity,
+  ProductEntity,
+  UserEntity,
+  type OrderStatus,
+} from './entities/index.js';
 import { BROKE_USER_EMAIL, RACE_PRODUCT, USER_BALANCE_CENTS } from './seed-fixtures.js';
 
 // Idempotent without explicit ids: ids are GENERATED ALWAYS, so every row is
@@ -40,11 +47,12 @@ interface SeededProduct {
 // decimal floats. bigint columns take strings in TypeORM.
 const toBigint = (cents: number) => String(cents);
 
-// 5% new, 20% shipped, 75% paid — the HW#12 split.
+// 5% paid, 20% shipped, 75% delivered: the same split as db/seed.sql, so 'paid'
+// stays q2's rare status.
 function statusFor(orderIndex: number): OrderStatus {
-  if (orderIndex % 20 === 0) return 'cancelled';
+  if (orderIndex % 20 === 0) return 'paid';
   if (orderIndex % 4 === 0) return 'shipped';
-  return 'paid';
+  return 'delivered';
 }
 
 // The unique email makes this a true upsert. created_at and the balance are
@@ -130,9 +138,10 @@ async function seedOrders(manager: EntityManager, users: UserEntity[], products:
     const lines = linesFor(orderIndex, products);
     const totalCents = lines.reduce((sum, line) => sum + line.priceCents * line.quantity, 0);
 
+    const status = statusFor(orderIndex);
     const order = manager.create(OrderEntity, {
       user,
-      status: statusFor(orderIndex),
+      status,
       totalCents: toBigint(totalCents),
       createdAt,
       items: lines.map((line) =>
@@ -145,6 +154,10 @@ async function seedOrders(manager: EntityManager, users: UserEntity[], products:
       ),
     });
     await manager.save(order); // cascade: true inserts the lines
+
+    // The creation event checkout would write, so no seeded order has an empty history.
+    // Synthetic for a non-paid order: null → its seeded status.
+    await manager.insert(OrderEventEntity, { order: { id: order.id }, fromStatus: null, toStatus: status, createdAt });
   }
 }
 

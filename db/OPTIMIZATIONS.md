@@ -40,11 +40,12 @@ done
 | Query | Buffers | Execution time | Plan after | Index size |
 |---|---|---|---|---|
 | q1 | 1,605 → 35 | 6.218 → 0.160 ms | Bitmap scan on `orders_user_created_idx` | 3.0 MB |
-| q2 | 1,605 → 776 | 6.834 → 1.604 ms | Bitmap scan on `orders_paid_created_idx` | 128 kB |
+| q2 | 1,605 → 776 | 6.834 → 1.604 ms | Bitmap scan on `orders_new_created_idx` | 128 kB |
 | q3 | 4,150 → 4 | 36.460 → 0.095 ms | Index Scan on `products_lower_name_idx` | 5.7 MB |
 | q4 | 4,156 → 377 | 12.623 → 1.206 ms | Bitmap scan on `products_search_vector_idx` | 6.2 MB |
 
 Buffers are the stable comparison; timings are single runs and vary by a few ms between runs.
+The q2 row is the HW#12 measurement, when the rare status was `'new'`; see the note under q2.
 The four indexes add 15.1 MB in total. Their cost on writes is not measured here.
 
 ### q1
@@ -103,9 +104,15 @@ bitmap scan reads them in physical order. Sorting 26 rows costs next to nothing.
 
 ### q2
 
-Orders with status `'paid'` since a date. Index: `orders_paid_created_idx`. [`db/queries/q2.sql`](queries/q2.sql)
+Orders with status `'new'` since a date. Index: `orders_new_created_idx`. [`db/queries/q2.sql`](queries/q2.sql)
 
-`orders_paid_created_idx` entered the plan as a Bitmap Index Scan, the Seq Scan on `orders` disappeared (the Sort stayed), and buffers fell from 1,605 to 776: 7 in the index, 766 in the heap because the 1,709 matching orders are spread over 766 pages, and 3 at the Sort node.
+> **Measured before HW#18, and not re-run.** HW#18 dropped the `new` status. The rare 5% status
+> is now `'paid'`: the query, the seed and the index (`orders_paid_created_idx`) changed with it.
+> The numbers and plans below are the HW#12 run against `'new'`, unchanged. The share is the same
+> 5%, so a re-run with the README sequence should give a plan of the same shape, but these exact
+> numbers belong to the old run.
+
+`orders_new_created_idx` entered the plan as a Bitmap Index Scan, the Seq Scan on `orders` disappeared (the Sort stayed), and buffers fell from 1,605 to 776: 7 in the index, 766 in the heap because the 1,709 matching orders are spread over 766 pages, and 3 at the Sort node.
 
 Before:
 
@@ -117,7 +124,7 @@ Before:
    Sort Method: quicksort  Memory: 147kB
    Buffers: shared hit=1605
    ->  Seq Scan on orders  (cost=0.00..3102.00 rows=1669 width=31) (actual time=0.361..6.231 rows=1709 loops=1)
-         Filter: ((created_at >= '2026-06-01 00:00:00+00'::timestamp with time zone) AND (status = 'paid'::text))
+         Filter: ((created_at >= '2026-06-01 00:00:00+00'::timestamp with time zone) AND (status = 'new'::text))
          Rows Removed by Filter: 98291
          Buffers: shared hit=1602
  Planning:
@@ -137,10 +144,10 @@ After:
    Sort Method: quicksort  Memory: 147kB
    Buffers: shared hit=769 read=7
    ->  Bitmap Heap Scan on orders  (cost=37.09..1724.87 rows=1653 width=31) (actual time=0.254..1.044 rows=1709 loops=1)
-         Recheck Cond: ((created_at >= '2026-06-01 00:00:00+00'::timestamp with time zone) AND (status = 'paid'::text))
+         Recheck Cond: ((created_at >= '2026-06-01 00:00:00+00'::timestamp with time zone) AND (status = 'new'::text))
          Heap Blocks: exact=766
          Buffers: shared hit=766 read=7
-         ->  Bitmap Index Scan on orders_paid_created_idx  (cost=0.00..36.68 rows=1653 width=0) (actual time=0.168..0.168 rows=1709 loops=1)
+         ->  Bitmap Index Scan on orders_new_created_idx  (cost=0.00..36.68 rows=1653 width=0) (actual time=0.168..0.168 rows=1709 loops=1)
                Index Cond: (created_at >= '2026-06-01 00:00:00+00'::timestamp with time zone)
                Buffers: shared read=7
  Planning:
@@ -151,7 +158,7 @@ After:
 ```
 
 The index is 128 kB, about a twentieth of a full index on `created_at`, since it holds only the
-5% of rows with `status = 'paid'`. Its Index Cond shows only the `created_at` range: the status
+5% of rows with `status = 'new'`. Its Index Cond shows only the `created_at` range: the status
 condition is part of the index definition, so there is nothing left to check for it inside the
 index. The heap reads dominate, so the saving is smaller than for q1.
 

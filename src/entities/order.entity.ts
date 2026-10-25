@@ -13,7 +13,10 @@ import {
 import { UserEntity } from './user.entity.js';
 import { OrderItemEntity } from './order-item.entity.js';
 
-// One list drives both the TS type and the CHECK constraint, so they can't drift.
+// The source of truth for statuses: the TS type and the entity's @Check come from it.
+// Two copies are hand-written: the CHECK a migration created (TypeORM compares CHECKs by
+// name, so migration:generate won't notice a new status) and the spec's OrderStatus enum.
+// test/integration/order-statuses.spec.ts fails if either one drifts from this list.
 export const ORDER_STATUSES = [
   'paid',
   'processing',

@@ -10,9 +10,8 @@ import { OrderEventsBus } from './order-events.bus.js';
   providers: [OrderEventsBus],
   exports: [OrderEventsBus],
 })
-
 export class OrderEventsModule implements OnModuleInit {
-  constructor(private readonly bus: OrderEventsBus) {}                                             
+  constructor(private readonly bus: OrderEventsBus) {}
 
   // TEMPORARY (Phase B check. remove in phase C): log every event that reaches the bus
   onModuleInit() {

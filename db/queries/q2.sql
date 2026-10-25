@@ -1,5 +1,5 @@
 /*
-  q2 · orders with the rare status 'paid' (5% of rows) since a given date.
+  q2 · orders with the rare status 'paid' (5% of rows in both seeds) since a given date.
   Index target: partial index on (created_at) WHERE status = 'paid'.
   It holds only the 5% of orders the query can ever match, so it is about
   a twentieth the size of a full index. The planner uses it only when the
