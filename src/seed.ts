@@ -42,7 +42,7 @@ const toBigint = (cents: number) => String(cents);
 
 // 5% new, 20% shipped, 75% paid — the HW#12 split.
 function statusFor(orderIndex: number): OrderStatus {
-  if (orderIndex % 20 === 0) return 'new';
+  if (orderIndex % 20 === 0) return 'cancelled';
   if (orderIndex % 4 === 0) return 'shipped';
   return 'paid';
 }

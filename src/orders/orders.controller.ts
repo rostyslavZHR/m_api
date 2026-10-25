@@ -1,5 +1,18 @@
-import { Body, Controller, Get, Headers, Param, Post, Query } from '@nestjs/common';
-import { type CreateOrder, OrdersService } from './orders.service.js';
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  Param,
+  Patch,
+  Post,
+  Query,
+} from '@nestjs/common';
+import {
+  type CreateOrder,
+  OrdersService,
+  type UpdateOrderStatus,
+} from './orders.service.js';
 
 @Controller('orders')
 export class OrdersController {
@@ -16,7 +29,18 @@ export class OrdersController {
   }
 
   @Post()
-  create(@Headers('idempotency-key') idempotencyKey: string, @Body() body: CreateOrder) {
+  create(
+    @Headers('idempotency-key') idempotencyKey: string,
+    @Body() body: CreateOrder,
+  ) {
     return this.ordersService.create(idempotencyKey, body);
+  }
+
+  @Patch(':id/status')
+  updateStatus(
+    @Param('id') id: string,
+    @Body() { status }: UpdateOrderStatus,
+  ) {
+    return this.ordersService.updateStatus({ id: Number(id), to: status });
   }
 }

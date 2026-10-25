@@ -215,7 +215,7 @@ PGPASSWORD=admin-bootstrap-only psql -h localhost -p 21110 -U admin -d shop
 
 **The schema has one source: the migrations in [src/migrations/](src/migrations/).** Tables, constraints, every index and the statistics object come from `npm run migrate`; `db/` only holds the HW#12 benchmark — a bulk dataset, the four queries and their recorded plans.
 
-Sequence to reproduce the plans in [db/OPTIMIZATIONS.md](db/OPTIMIZATIONS.md) — schema, bulk seed, plans without the query indexes, plans with them:
+Sequence to reproduce the plans in [db/OPTIMIZATIONS.md](db/OPTIMIZATIONS.md) — schema, bulk seed, plans without the query indexes, plans with them.
 
 ```bash
 export PGHOST=localhost PGPORT=21110 PGUSER=admin PGDATABASE=shop PGPASSWORD=admin-bootstrap-only
@@ -230,7 +230,7 @@ for q in 1 2 3 4; do
   echo "=== q$q BEFORE ==="
   psql -q <<SQL
 BEGIN;
-DROP INDEX orders_user_created_idx, orders_new_created_idx, products_lower_name_idx, products_search_vector_idx;
+DROP INDEX orders_user_created_idx, orders_paid_created_idx, products_lower_name_idx, products_search_vector_idx;
 DROP STATISTICS products_lower_name_stat;
 EXPLAIN (ANALYZE, BUFFERS) $(cat db/queries/q$q.sql);
 ROLLBACK;

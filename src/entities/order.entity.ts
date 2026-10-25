@@ -14,8 +14,24 @@ import { UserEntity } from './user.entity.js';
 import { OrderItemEntity } from './order-item.entity.js';
 
 // One list drives both the TS type and the CHECK constraint, so they can't drift.
-export const ORDER_STATUSES = ['new', 'paid', 'shipped', 'cancelled'] as const;
+export const ORDER_STATUSES = [
+  'paid',
+  'processing',
+  'shipped',
+  'out_for_delivery',
+  'delivered',
+  'cancelled',
+] as const;
 export type OrderStatus = (typeof ORDER_STATUSES)[number];
+
+export const ORDER_TRANSITIONS: Record<OrderStatus, readonly OrderStatus[]> = {
+  paid: ['processing', 'cancelled'],
+  processing: ['shipped', 'cancelled'],
+  shipped: ['out_for_delivery'],
+  out_for_delivery: ['delivered'],
+  delivered: [],
+  cancelled: [],
+};
 
 const statusList = ORDER_STATUSES.map((status) => `'${status}'`).join(', ');
 
@@ -24,16 +40,19 @@ const statusList = ORDER_STATUSES.map((status) => `'${status}'`).join(', ');
 @Check('orders_total_cents_check', 'total_cents >= 0')
 // Property names, not column names: TypeORM resolves user to user_id.
 @Index('orders_user_created_idx', ['user', 'createdAt'])
-@Index('orders_new_created_idx', ['createdAt'], { where: `status = 'new'` })
+@Index('orders_paid_created_idx', ['createdAt'], { where: `status = 'paid'` })
 export class OrderEntity {
-  @PrimaryGeneratedColumn('identity', { type: 'bigint', generatedIdentity: 'ALWAYS' })
+  @PrimaryGeneratedColumn('identity', {
+    type: 'bigint',
+    generatedIdentity: 'ALWAYS',
+  })
   id: string;
 
   @ManyToOne(() => UserEntity, { onDelete: 'RESTRICT', nullable: false })
   @JoinColumn({ name: 'user_id' })
   user: Relation<UserEntity>;
 
-  @Column('text', { default: 'new' })
+  @Column('text', { default: 'paid' })
   status: OrderStatus;
 
   // Stored, not summed on read: it's a fact about the transaction (HW#12 decision).
