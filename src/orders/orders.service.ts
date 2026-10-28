@@ -16,7 +16,11 @@ import type { OrderEntity, OrderStatus } from '../entities/index.js';
 import { OrdersRepository } from './orders.repository.js';
 import { ORDER_TRANSITIONS } from '../entities/order.entity.js';
 import { OrderEventsBus } from '../order-events/order-events.bus.js';
-import { toStatusEvent } from '../order-events/order-status-event.js';
+import {
+  OrderStatusEvent,
+  toStatusEvent,
+} from '../order-events/order-status-event.js';
+import { Observable } from 'rxjs';
 
 // The OrderItem, Order and CreateOrder schemas in openapi/openapi.yaml.
 interface OrderItem {
@@ -46,6 +50,11 @@ export interface UpdateOrderStatus {
 export interface UpdateStatus {
   id: number;
   to: OrderStatus;
+}
+
+export interface StreamEvents {
+  orderId: number;
+  afterId: number;
 }
 
 // bigint columns arrive as strings; these values are far below 2^53.
@@ -173,6 +182,53 @@ export class OrdersService {
 
     this.ordersEventBus.publish(toStatusEvent(orderEvent));
     return this.getById(id);
+  }
+
+  // One order's status events: history (rows already in order_events after afterId),
+  // then live events from the bus. The 404 check runs before the stream starts, so an
+  // unknown order still gets a proper problem+json response.
+  async streamEvents({
+    orderId,
+    afterId,
+  }: StreamEvents): Promise<Observable<OrderStatusEvent>> {
+    const order = await this.orders.findById(String(orderId));
+    if (!order) throw new NotFoundException(`Order ${orderId} not found.`);
+
+    // Runs once per subscriber (per SSE connection), when Nest subscribes.
+    return new Observable((subscriber) => {
+      let lastSent = afterId;
+      // Holds live events while history loads; null once history is sent.
+      let buffer: OrderStatusEvent[] | null = [];
+
+      // One gate for history, buffer and live: drops anything at or before what was
+      // sent, so an event both in history and in the buffer goes out once.
+      const send = (event: OrderStatusEvent) => {
+        if (event.eventId <= lastSent) return;
+        lastSent = event.eventId;
+        subscriber.next(event);
+      };
+
+      // 1. Subscribe to live first: the other way round, an event committed during
+      // the history read would be lost.
+      const live = this.ordersEventBus
+        .forOrder(orderId)
+        .subscribe((event) => (buffer ? buffer.push(event) : send(event)));
+
+      // 2. History, then what was buffered meanwhile, then switch to live. Synchronous
+      // inside .then, so no live event can slip in between.
+      this.orders
+        .findOrderEvents({ orderId: String(orderId), afterId: String(afterId) })
+        .then((events) => {
+          events.map(toStatusEvent).forEach(send);
+          buffer!.forEach(send); // only this callback sets it to null, below
+          buffer = null;
+        })
+        .catch((err) => subscriber.error(err));
+
+      // 3. Teardown: Nest unsubscribes when the client disconnects; without this, every
+      // closed connection would leave a listener on the bus.
+      return () => live.unsubscribe();
+    });
   }
 
   private encodeCursor(id: string): string {

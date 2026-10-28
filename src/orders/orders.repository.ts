@@ -31,6 +31,11 @@ export interface NewOrderEvent {
   to: OrderStatus;
 }
 
+export interface FindOrderEvents {
+  orderId: string;
+  afterId: string;
+}
+
 // Takes an EntityManager so the same class works on the app's connection and
 // inside checkout's transaction.
 export class OrdersRepository {
@@ -102,5 +107,17 @@ export class OrdersRepository {
         order: { id: orderId },
       }),
     );
+  }
+ // Replay for SSE: strictly after afterId (the client already has that one),
+  // oldest first. Loads `order` because toStatusEvent reads event.order.id.
+  findOrderEvents({
+    orderId,
+    afterId,
+  }: FindOrderEvents): Promise<OrderEventEntity[]> {
+    return this.manager.find(OrderEventEntity, {
+      where: { order: { id: orderId }, id: MoreThan(afterId) },
+      relations: { order: true },
+      order: { id: 'ASC' },
+    });
   }
 }
