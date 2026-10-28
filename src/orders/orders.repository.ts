@@ -108,7 +108,8 @@ export class OrdersRepository {
       }),
     );
   }
- // Replay for SSE: strictly after afterId (the client already has that one),
+
+  // Replay for SSE: strictly after afterId (the client already has that one),
   // oldest first. Loads `order` because toStatusEvent reads event.order.id.
   findOrderEvents({
     orderId,
