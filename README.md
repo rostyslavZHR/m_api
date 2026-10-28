@@ -85,7 +85,7 @@ grep -rnE "PACT_BROKER_TOKEN[\"']?[[:space:]]*[:=][[:space:]]*[\"'][^\"'$]" --in
 
 | Criterion | Command → expected |
 |---|---|
-| Integration, run twice | `npm run test:integration && npm run test:integration` → `PASS` lines, `Tests: 19 passed` twice |
+| Integration, run twice | `npm run test:integration && npm run test:integration` → `PASS` lines, `Tests: 21 passed` twice |
 | E2E | `npm run test:e2e` → `Tests: 6 passed` |
 | Constraint tests | `grep -rniE "duplicate key\|unique\|2350[0-9]\|foreign key\|constraint" test/` → `23514`, `23503`, `23505` |
 | E2E negative cases | `grep -rnE "\b(400\|404\|409\|422)\b" test/e2e/` → matches |
@@ -97,6 +97,55 @@ grep -rnE "PACT_BROKER_TOKEN[\"']?[[:space:]]*[:=][[:space:]]*[\"'][^\"'$]" --in
 | CI | `grep -rn "can-i-deploy" .github/workflows/` and the `yaml.safe_load` check |
 | Vault wrapper | `test -f scripts/with-secrets.sh && grep -q SKIP_VAULT scripts/with-secrets.sh` |
 | No literal token | the `PACT_BROKER_TOKEN` grep above → no output |
+
+### HW#18: real-time order status
+
+Run this after the setup at the top of [Grading](#grading): DB up, `.env` and `secrets/db_password` in place, migrations applied, `npm run seed` done. Start the app in a second terminal. The build is `tsc`, through `nest build`; `tsx` would not work, because it doesn't emit the decorator metadata Nest's dependency injection needs:
+
+```bash
+npm run build && node dist/main.js     # listens on PORT from .env: http://localhost:3000
+```
+
+SSE: create an order (user 1 and product 2 are seeded by `npm run seed`), then take it through all 4 status changes. Run it as often as you like: each time it's a new order, starting at `paid`.
+
+```bash
+ORDER=$(curl -s -X POST http://localhost:3000/orders \
+  -H "Content-Type: application/json" -H "Idempotency-Key: $(node -p 'crypto.randomUUID()')" \
+  -d '{"user_id":1,"items":[{"product_id":2,"quantity":1}]}' \
+  | node -pe 'JSON.parse(require("fs").readFileSync(0)).id')
+echo "order $ORDER"
+for s in processing shipped out_for_delivery delivered; do
+  curl -s -o /dev/null -w "$s → %{http_code}\n" -X PATCH http://localhost:3000/orders/$ORDER/status \
+    -H "Content-Type: application/json" -d "{\"status\":\"$s\"}"
+done
+
+curl -s -o /dev/null -D - -m 2 http://localhost:3000/orders/$ORDER/events | grep -i '^content-type'
+curl -s -N -m 2 http://localhost:3000/orders/$ORDER/events
+curl -s -N -m 2 -H "Last-Event-ID: 3" http://localhost:3000/orders/$ORDER/events | grep '^id:'
+
+THIRD=$(curl -s -N -m 2 http://localhost:3000/orders/$ORDER/events | grep '^id:' | sed -n 3p | cut -d' ' -f2)
+curl -s -N -m 2 -H "Last-Event-ID: $THIRD" http://localhost:3000/orders/$ORDER/events | grep '^id:'
+```
+
+The stream stays open until the client disconnects; `-m 2` ends each `curl` after 2 s (exit code 28).
+
+| Check | Expected |
+|---|---|
+| 4 PATCHes | `processing → 200` … `delivered → 200` |
+| Header | `Content-Type: text/event-stream` |
+| Event format | 5 events (the creation event `null → paid`, then the 4 changes), each `event: order.status`, `id: <n>`, `data: {"eventId":<n>,"orderId":…,"from":…,"to":…,"at":…}`; the first also carries `retry: 1000` |
+| `Last-Event-ID: 3` | all 5 `id:` lines: event ids are global, so every event of a new order is after event 3 (see [Event ids](#event-ids)) |
+| `Last-Event-ID: <third id>` | only the last 2 ids: the replay starts strictly after the given id |
+| Unknown order | `curl -i http://localhost:3000/orders/999999999/events` → `404`, `application/problem+json` |
+
+WebSocket: the demo, in both modes. The [Real-time demo](#real-time-demo) section explains it.
+
+```bash
+node scripts/realtime-demo.mjs; echo "exit=$?"               # A_RECEIVED=1  B_RECEIVED=0  exit=0
+node scripts/realtime-demo.mjs --same-room; echo "exit=$?"   # A_RECEIVED=1  B_RECEIVED=1  exit=0
+```
+
+The [trade-offs](#trade-offs-websocket-vs-sse) and the [known gaps](#real-time-known-gaps) are further down.
 
 ## TypeORM data layer
 
@@ -197,6 +246,75 @@ curl -i -X POST http://localhost:3000/orders \
 
 Both 400s above come from the spec, not from code — there is no `if` anywhere in `src/` that checks for the `Idempotency-Key` header or inspects `items`. The validator rejects both requests before they reach a controller, purely because the spec declares the header `required: true` and `items` with `minItems: 1`.
 
+## Real-time order status (HW#18)
+
+Every committed status change reaches clients live over two transports: an SSE stream per order, and a Socket.IO gateway with per-order rooms. Both carry the same payload, `OrderStatusEvent` `{ eventId, orderId, from, to, at }`. Commands to try it are in [Grading → HW#18](#hw18-real-time-order-status).
+
+| Piece | Where | Note |
+|---|---|---|
+| Event bus | [src/order-events/order-events.bus.ts](src/order-events/order-events.bus.ts) (`OrderEventsBus`) | The brief expects `src/**/order-events.service.ts` with "a Subject plus an in-memory buffer of recent events". This is that Subject, **without the buffer**: replay reads the `order_events` table instead, which survives a restart, has no buffer size to tune, and is written in the same transaction as the status change. A plain `Subject` keeps nothing, so a late subscriber gets its history from the table, not from memory. |
+| Event history | `order_events` ([entity](src/entities/order-event.entity.ts); migrations `InitOrderEvent`, `BackfillOrderEvents`) | written with the status change in one transaction ([orders.service.ts](src/orders/orders.service.ts) `updateStatus`); checkout writes the creation event `null → paid` |
+| Status change | `PATCH /orders/{id}/status` ([openapi.yaml](openapi/openapi.yaml)) | guarded update + event insert, published only after commit; invalid or concurrent transition → `409` |
+| SSE | `GET /orders/{id}/events`: [orders.controller.ts](src/orders/orders.controller.ts) (`@Sse`) + `OrdersService.streamEvents` | history after `Last-Event-ID`, then live; `: ping` every 15 s |
+| WebSocket | [src/realtime/orders.gateway.ts](src/realtime/orders.gateway.ts), namespace `/orders`, same port | handshake `auth: { userId }`; `join { orderId }` checks ownership, joins `orders:<id>`, acks `{ ok, orderId, status, lastEventId }` or `{ ok: false, error }` |
+| Demo | [scripts/realtime-demo.mjs](scripts/realtime-demo.mjs) | see [Real-time demo](#real-time-demo) |
+
+### Event ids
+
+The SSE `id:` and the payload's `eventId` are `order_events.id`, **one counter for the whole system**, not one per order. Replay only needs "greater than", never "previous + 1". A per-order counter would need an extra column computed under a lock, for no gain. Two changes to one order are serialized by the order's row lock, so ids still increase within an order. So `Last-Event-ID: n` means "this order's events after event *n* of the whole system". On a freshly created order, `Last-Event-ID: 3` returns every event of that order, because they all come after event 3. The second replay command in the Grading recipe takes an id from the order's own stream, and shows the cut. Ids can have gaps: a rolled-back insert still uses one up.
+
+### Real-time demo
+
+With the app running (`npm start`) on a database seeded with `npm run seed`, one script checks Socket.IO room isolation end to end. It needs no build step. Use `npm run seed`, not `db/seed.sql`: the SQL seed leaves every user's balance at 0, so the demo's checkout fails and the script exits 2.
+
+```bash
+node scripts/realtime-demo.mjs; echo "exit=$?"
+# A_RECEIVED=1
+# B_RECEIVED=0
+# exit=0
+
+node scripts/realtime-demo.mjs --same-room; echo "exit=$?"
+# A_RECEIVED=1
+# B_RECEIVED=1
+# exit=0
+```
+
+Each run creates two fresh orders, A and B, for seeded user 1. It connects two clients to the `/orders` namespace as that user, joins client A to order A's room, and joins client B to order B's room (or to A's room with `--same-room`, the control run). Then it moves A from `paid` to `processing` over HTTP. stdout carries only the two lines; progress goes to stderr (`2>/dev/null` hides it).
+
+- **Exit codes:** `0` = as expected. `1` = not as expected; the two lines are still printed. `2` = setup failed, so there's no verdict: the app is down, a connect or join was refused, an ack didn't arrive, or a checkout or the PATCH failed. No result lines are printed in that case.
+- **Timing:** the whole run takes under a second. A broken setup ends within 15 s at most.
+- **It writes to the database:** each run creates 2 orders for user 1, takes 2 units of stock from the cheapest in-stock product and moves one order to `processing`.
+- **Configuration:** `DEMO_BASE_URL` (default `http://localhost:3000`) and `DEMO_USER_ID` (default `1`).
+
+### Real-time known gaps
+
+- **The WebSocket `userId` is a trusted claim until lecture 24:** anyone can connect as any user id. It's validated as a positive integer, kept in `socket.data`, and never taken from a message body.
+- **No auth on SSE or on the status change:** anyone who knows an order id can watch its stream, and anyone can PATCH any order's status.
+- **No replay over WebSocket:** Socket.IO doesn't buffer for a disconnected client, and a reconnected socket is in no rooms. The client re-joins; the join ack's `lastEventId` shows whether it missed anything, and recovery goes through SSE (`Last-Event-ID`) or `GET /orders/{id}`. Until the ack arrives, a client should hold live events, then drop any with `eventId <= lastEventId`.
+- **Live delivery is at most once:** a crash between `COMMIT` and `publish` drops the live event. SSE gets it back from the table on reconnect; WebSocket only through the ack snapshot.
+- **One throwing bus subscriber takes the whole API down:** the bus is an RxJS `Subject`, and a throw inside any subscriber's callback becomes an uncaught exception that exits Node. Seen in HW#18 (Phase D, deliberate failure 5): the PATCH had already committed, its client got a dropped connection, and every other request failed until a restart. That's why the gateway's and SSE's bus callbacks only emit or push, with nothing that can throw; anything heavier there needs its own try/catch.
+- **The bus is in-process:** one app instance only. See [Trade-offs](#trade-offs-websocket-vs-sse) for what breaks with two and how it's fixed.
+- **A fresh SSE connection gets the order's whole history:** there's no limit. That's fine for the handful of events an order has, not for a long stream.
+- **500 responses show the raw error message** in the problem `detail`, e.g. a DB connection error. That's the exception filter's behaviour for every non-HTTP error, not just real-time. Inside an SSE stream it doesn't happen: the stream just ends, and the error goes to the server log.
+- **CORS on the gateway is closed** (Socket.IO's default). The demo is headless; a browser client on another origin would need `cors: { origin: [...] }`.
+
+## Trade-offs: WebSocket vs SSE
+
+| Criterion | SSE (`GET /orders/{id}/events`) | Socket.IO (`/orders` gateway) |
+|---|---|---|
+| Direction | Server → client only. Client actions go over ordinary HTTP (the PATCH). | Both ways on one connection. Here the client sends `join` and gets an ack. |
+| Reconnecting and missed events | `EventSource` reconnects by itself (`retry: 1000`) and sends `Last-Event-ID`; the server replays everything after it from `order_events` (HW#18: `Last-Event-ID: 182` → 183, 184). | The Socket.IO client reconnects by itself, but as a new socket in no rooms, with nothing replayed (HW#18: 0 events until it re-joined). The ack's `lastEventId` shows the gap; recovery goes through SSE or GET. Socket.IO's `connectionStateRecovery` (in memory, short window) isn't enabled. A raw WebSocket doesn't reconnect at all. |
+| What the infrastructure needs | A long-lived plain HTTP response. It works through ordinary proxies and load balancers, as long as they don't buffer (Nest sends `X-Accel-Buffering: no`) and don't cut idle connections (the `: ping`). Browsers allow 6 connections per origin on HTTP/1.1; HTTP/2 multiplexes. | Socket.IO's own protocol on top of Engine.IO, not plain WebSocket: HTTP long-polling first, then an `Upgrade`. Proxies must pass `Upgrade`, and with more than one instance the polling phase needs sticky sessions. Client library on both ends. |
+| Cost per event (bytes on the wire, same 93-byte payload, measured) | **135 B**: `event:` / `id:` / `data:` lines plus HTTP/1.1 chunk framing. Keepalive: `: ping` every 15 s. | **122 B**: `42/orders,["order.status",…]` plus a 2-byte WebSocket header. Keepalive: an Engine.IO ping/pong every 25 s. |
+| Identity | `EventSource` can't set custom headers; cookies work (`withCredentials` across origins). Here: no auth at all. | `auth` payload in the handshake, checked in middleware before the connection exists. Here: a trusted `userId` claim. |
+| Delivery | Live at most once, but anything missed comes back from the table on reconnect; duplicates are dropped by id. | At most once per room; nothing is resent. The ack snapshot is the only way to see a gap. |
+| Scaling past one instance | Bus events must reach every instance. Replay already works from any instance: it reads the DB. | Bus events must reach every instance, rooms are per process, and long-polling needs sticky sessions. |
+| Fit for order status | One direction, and missed events can be recovered: exactly what this feature needs. | The two-way channel is used only for `join`. |
+
+**Verdict: SSE for order-status notifications in production.** The feature only goes server → client, missed events must be recoverable, and it sits behind ordinary HTTP infrastructure. This SSE endpoint already replays from the database with `Last-Event-ID`, while the Socket.IO side replays nothing and also needs `Upgrade` support and sticky sessions (the 13 bytes it saves per event don't matter at this rate). Before shipping, SSE needs auth, through a session cookie, which `EventSource` sends. The choice would flip to WebSocket if the client had to send frequent messages on the same channel, such as a support chat or live bidding.
+
+**Two or more instances:** the bus is an in-process `Subject`, so an event is published only on the instance that handled the PATCH. SSE streams and Socket.IO rooms on the other instances never get it live: SSE clients catch up from the table only after a reconnect, and WebSocket clients don't catch up at all. On top of that, Socket.IO's long-polling handshake fails unless every request of a session reaches the same instance. The fix is to feed every instance's bus from a broker (Redis pub/sub, or Postgres `LISTEN/NOTIFY` on the `order_events` insert); for Socket.IO rooms, the Redis adapter does that job. Socket.IO also needs sticky sessions, or clients that connect over `transports: ['websocket']` only.
+
 ## Database: schema, seed, indexes
 
 Main table: orders (100,000 rows). Search table: products (100,000 rows).
@@ -215,7 +333,7 @@ PGPASSWORD=admin-bootstrap-only psql -h localhost -p 21110 -U admin -d shop
 
 **The schema has one source: the migrations in [src/migrations/](src/migrations/).** Tables, constraints, every index and the statistics object come from `npm run migrate`; `db/` only holds the HW#12 benchmark — a bulk dataset, the four queries and their recorded plans.
 
-Sequence to reproduce the plans in [db/OPTIMIZATIONS.md](db/OPTIMIZATIONS.md) — schema, bulk seed, plans without the query indexes, plans with them:
+Sequence to reproduce the plans in [db/OPTIMIZATIONS.md](db/OPTIMIZATIONS.md) — schema, bulk seed, plans without the query indexes, plans with them.
 
 ```bash
 export PGHOST=localhost PGPORT=21110 PGUSER=admin PGDATABASE=shop PGPASSWORD=admin-bootstrap-only
@@ -230,7 +348,7 @@ for q in 1 2 3 4; do
   echo "=== q$q BEFORE ==="
   psql -q <<SQL
 BEGIN;
-DROP INDEX orders_user_created_idx, orders_new_created_idx, products_lower_name_idx, products_search_vector_idx;
+DROP INDEX orders_user_created_idx, orders_paid_created_idx, products_lower_name_idx, products_search_vector_idx;
 DROP STATISTICS products_lower_name_stat;
 EXPLAIN (ANALYZE, BUFFERS) $(cat db/queries/q$q.sql);
 ROLLBACK;
@@ -243,11 +361,11 @@ for q in 1 2 3 4; do
 done > db/after.txt
 ```
 
-`docker compose down -v` deletes the database volume, so every run starts from an empty database. User ids, quantities and order dates in the seed are random, so row counts for q1 and q2 differ slightly between runs; product names, prices and the search terms' match rates do not. The committed `before.txt` / `after.txt` are the HW#12 measurements, taken when the schema still came from SQL files and money was `numeric`.
+`docker compose down -v` deletes the database volume, so every run starts from an empty database. User ids, quantities and order dates in the seed are random, so row counts for q1 and q2 differ slightly between runs; product names, prices and the search terms' match rates do not. The committed `before.txt` / `after.txt` are the HW#12 measurements, taken when the schema still came from SQL files, money was `numeric`, and q2's rare status was `'new'` (HW#18 replaced it with `'paid'`, also 5% of the seed). They were not re-run, so their q2 plans still show `'new'` and `orders_new_created_idx`.
 
 | File | Purpose |
 |---|---|
-| [db/seed.sql](db/seed.sql) | 1,000 users, 100,000 products, 100,000 orders, 200,000 order lines on the migrated schema; ends with `VACUUM (ANALYZE)` |
+| [db/seed.sql](db/seed.sql) | 1,000 users, 100,000 products, 100,000 orders, 200,000 order lines on the migrated schema; ends with `VACUUM (ANALYZE)`. For query plans only: it writes no `order_events`, so its orders have no status history. For SSE, use `npm run seed` or an order created through checkout |
 | [db/queries/](db/queries/) | `q1`–`q4`, one statement per file, no semicolon, so each works inside `$(cat …)` |
 | [db/OPTIMIZATIONS.md](db/OPTIMIZATIONS.md) | before/after plans, index sizes, the Ukrainian morphology limitation |
 
@@ -565,13 +683,15 @@ The multi-stage [Dockerfile](Dockerfile) only copies `dist/`, `package*.json`, `
 
 | File / folder | Purpose |
 |---|---|
-| `openapi/openapi.yaml` | spec: 2 resources (`/products`, `/orders`), 5 operations, cursor pagination, Idempotency-Key, problem+json |
+| `openapi/openapi.yaml` | spec: 2 resources (`/products`, `/orders`), cursor pagination, Idempotency-Key, problem+json; `PATCH /orders/{id}/status` and the `text/event-stream` route `GET /orders/{id}/events` |
 | `src/main.ts` | bootstraps Nest, mounts `express-openapi-validator` and the fallback error handler |
 | `src/products/`, `src/orders/` | one Nest module (controller + service) per resource, in-memory data |
 | `src/common/` | shared `problem+json` builder and the global exception filter |
 | `src/config/env.schema.ts` | zod schema for all env vars, fail-fast `validate()` |
 | `src/db/` | `DbModule`/`DbService`/`DbController` — the app's DataSource (`app-data-source.ts`), `/db` health query |
 | `src/health-check/` | dependency-free `/health` module (`{ uptimeSec }`) |
+| `src/order-events/` | `OrderEventsBus` (the in-process Subject for committed status changes) and the `OrderStatusEvent` payload both transports send, see [Real-time order status](#real-time-order-status-hw18) |
+| `src/realtime/` | `OrdersGateway`: the Socket.IO `/orders` namespace, handshake identity, `join` with the ownership check, bus → rooms |
 | `src/entities/` | TypeORM entities for the HW#12 schema; `index.ts` exports them and the list the DataSource registers |
 | `src/migrations/` | the only schema source: `Init` (generated, hand-written parts marked), `MoneyToMinorUnits` (hand-written), `StockBalanceJobs` (generated, simplified), `RuntimeReadOnlySchemaHistory` (hand-written) |
 | `src/data-source.ts` | DataSource for the CLI and DB scripts: `synchronize: false`, URL from `MIGRATIONS_DB_URL` |
@@ -589,6 +709,7 @@ The multi-stage [Dockerfile](Dockerfile) only copies `dist/`, `package*.json`, `
 | `backup.cron` | nightly 03:00 schedule for `scripts/backup.sh`, with install notes |
 | `scripts/with-secrets.sh` | loads `.secrets/infisical.env` and runs the command; `SKIP_VAULT=1` skips the store |
 | `.env.example` | env var contract, kept in sync with the schema via `npm run check:env` |
+| `scripts/realtime-demo.mjs` | room-isolation demo: `A_RECEIVED` / `B_RECEIVED`, `--same-room` control run, see [Real-time demo](#real-time-demo) |
 | `scripts/check-env-example.js` | diffs `.env.example` against the schema in both directions |
 | `secrets/db_password` | gitignored password file, read fresh on every new DB connection |
 | `docker-compose.yml`, `init.sql` | local Postgres and PgBouncer for development; roles, grants, `get_auth()` |

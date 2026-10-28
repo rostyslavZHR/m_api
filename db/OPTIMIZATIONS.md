@@ -45,6 +45,7 @@ done
 | q4 | 4,156 → 377 | 12.623 → 1.206 ms | Bitmap scan on `products_search_vector_idx` | 6.2 MB |
 
 Buffers are the stable comparison; timings are single runs and vary by a few ms between runs.
+The q2 row is the HW#12 measurement, when the rare status was `'new'`; see the note under q2.
 The four indexes add 15.1 MB in total. Their cost on writes is not measured here.
 
 ### q1
@@ -104,6 +105,12 @@ bitmap scan reads them in physical order. Sorting 26 rows costs next to nothing.
 ### q2
 
 Orders with status `'new'` since a date. Index: `orders_new_created_idx`. [`db/queries/q2.sql`](queries/q2.sql)
+
+> **Measured before HW#18, and not re-run.** HW#18 dropped the `new` status. The rare 5% status
+> is now `'paid'`: the query, the seed and the index (`orders_paid_created_idx`) changed with it.
+> The numbers and plans below are the HW#12 run against `'new'`, unchanged. The share is the same
+> 5%, so a re-run with the README sequence should give a plan of the same shape, but these exact
+> numbers belong to the old run.
 
 `orders_new_created_idx` entered the plan as a Bitmap Index Scan, the Seq Scan on `orders` disappeared (the Sort stayed), and buffers fell from 1,605 to 776: 7 in the index, 766 in the heap because the 1,709 matching orders are spread over 766 pages, and 3 at the Sort node.
 
