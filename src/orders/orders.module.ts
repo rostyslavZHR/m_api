@@ -17,5 +17,7 @@ import { OrderEventsModule } from '../order-events/order-events.module.js';
     },
     OrdersService,
   ],
+  // For the WebSocket gateway's ownership check.
+  exports: [OrdersService],
 })
 export class OrdersModule {}

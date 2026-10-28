@@ -58,6 +58,16 @@ export interface StreamEvents {
   afterId: number;
 }
 
+export interface FindOwnedOrder {
+  orderId: number;
+  userId: number;
+}
+
+export interface OwnedOrder {
+  status: OrderStatus;
+  lastEventId: number | null;
+}
+
 // bigint columns arrive as strings; these values are far below 2^53.
 const toOrder = (entity: OrderEntity): Order => ({
   id: Number(entity.id),
@@ -236,6 +246,23 @@ export class OrdersService {
       // closed connection would leave a listener on the bus.
       return () => live.unsubscribe();
     });
+  }
+
+  // null for an unknown order and for someone else's alike, so a client can't
+  // probe which order ids exist.
+  async findOwnedOrder({
+    orderId,
+    userId,
+  }: FindOwnedOrder): Promise<OwnedOrder | null> {
+    const row = await this.orders.findOwnedOrder({
+      orderId: String(orderId),
+      userId: String(userId),
+    });
+    if (!row) return null;
+    return {
+      status: row.status,
+      lastEventId: row.lastEventId === null ? null : Number(row.lastEventId),
+    };
   }
 
   private encodeCursor(id: string): string {

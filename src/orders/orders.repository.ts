@@ -36,6 +36,11 @@ export interface FindOrderEvents {
   afterId: string;
 }
 
+export interface FindOwnedOrder {
+  orderId: string;
+  userId: string;
+}
+
 // Takes an EntityManager so the same class works on the app's connection and
 // inside checkout's transaction.
 export class OrdersRepository {
@@ -119,5 +124,24 @@ export class OrdersRepository {
       where: { orderId, id: MoreThan(afterId) },
       order: { id: 'ASC' },
     });
+  }
+
+  // One row only if the order exists AND is this user's. lastEventId lets a
+  // WebSocket client see whether it missed events (there's no replay over WS).
+  findOwnedOrder({
+    orderId,
+    userId,
+  }: FindOwnedOrder): Promise<
+    { status: OrderStatus; lastEventId: string | null } | undefined
+  > {
+    return this.manager
+      .createQueryBuilder(OrderEntity, 'o')
+      .select('o.status', 'status')
+      .addSelect(
+        '(SELECT max(e.id) FROM order_events e WHERE e.order_id = o.id)',
+        'lastEventId',
+      )
+      .where('o.id = :orderId AND o.user_id = :userId', { orderId, userId })
+      .getRawOne();
   }
 }
