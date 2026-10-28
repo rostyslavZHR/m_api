@@ -8,15 +8,33 @@ import {
   WebSocketServer,
 } from '@nestjs/websockets';
 import type { Subscription } from 'rxjs';
-import type { Namespace, Socket } from 'socket.io';
+import type { DefaultEventsMap, Namespace, Socket } from 'socket.io';
 import { z } from 'zod';
 import type { OrderStatus } from '../entities/index.js';
 import { OrderEventsBus } from '../order-events/order-events.bus.js';
-import { OrdersService, type OwnedOrder } from '../orders/orders.service.js';
+import { OrdersService } from '../orders/orders.service.js';
 
 const room = (orderId: number) => `orders:${orderId}`;
 
-// Handshake `auth`: a trusted claim until real auth.
+// What the handshake check leaves on each socket.
+interface SocketData {
+  userId: number;
+}
+type OrdersSocket = Socket<
+  DefaultEventsMap,
+  DefaultEventsMap,
+  DefaultEventsMap,
+  SocketData
+>;
+type OrdersNamespace = Namespace<
+  DefaultEventsMap,
+  DefaultEventsMap,
+  DefaultEventsMap,
+  SocketData
+>;
+
+// Handshake `auth`: a trusted claim until real auth. ids are bigint in the DB;
+// int() already caps them at Number.MAX_SAFE_INTEGER, far inside bigint's range.
 const Handshake = z.object({ userId: z.number().int().positive() });
 
 // The validator doesn't cover WebSocket messages, so payloads are checked here.
@@ -40,7 +58,7 @@ export class OrdersGateway implements OnGatewayInit, OnModuleDestroy {
   private busSubscription?: Subscription;
 
   // The /orders namespace, set by Nest after init (hence `!`).
-  @WebSocketServer() private readonly server!: Namespace;
+  @WebSocketServer() private readonly server!: OrdersNamespace;
 
   constructor(
     private readonly bus: OrderEventsBus,
@@ -48,7 +66,7 @@ export class OrdersGateway implements OnGatewayInit, OnModuleDestroy {
   ) {}
 
   // Runs once, before any client connects.
-  afterInit(server: Namespace): void {
+  afterInit(server: OrdersNamespace): void {
     // Checked before the connection exists: a bad handshake gets connect_error.
     // Identity lives in socket.data from here on, never in message bodies.
     server.use((socket, next) => {
@@ -75,28 +93,40 @@ export class OrdersGateway implements OnGatewayInit, OnModuleDestroy {
   // The return value is the ack (the client sends an ack callback).
   @SubscribeMessage('join')
   async join(
-    @ConnectedSocket() socket: Socket,
+    @ConnectedSocket() socket: OrdersSocket,
     @MessageBody() body: unknown,
   ): Promise<JoinAck> {
     const parsed = JoinPayload.safeParse(body);
     if (!parsed.success) return { ok: false, error: 'invalid_payload' };
 
     const { orderId } = parsed.data;
-    let order: OwnedOrder | null;
+    const { userId } = socket.data;
     try {
-      order = await this.ordersService.findOwnedOrder({
+      // Ownership, then join, then the snapshot for the ack. Joined before the
+      // snapshot is read, an event committed meanwhile either reaches the room live
+      // or is already counted in lastEventId (the client drops live events with
+      // eventId <= lastEventId). Read-then-join loses an event committed between
+      // the two, and the ack's lastEventId doesn't show it.
+      const owned = await this.ordersService.findOwnedOrder({
         orderId,
-        userId: socket.data.userId,
+        userId,
       });
+      // Unknown and foreign orders get the same answer.
+      if (!owned) return { ok: false, error: 'not_found' };
+
+      await socket.join(room(orderId));
+      const snapshot = await this.ordersService.findOwnedOrder({
+        orderId,
+        userId,
+      });
+      if (!snapshot) throw new Error(`Order ${orderId} vanished during join.`);
+      return { ok: true, orderId, ...snapshot };
     } catch (err) {
-      // A throw would never ack; the client would just time out.
+      // A throw would never ack; the client would just time out. Not joined either:
+      // a client told 'unavailable' mustn't keep receiving the order's events.
       this.logger.error(err);
+      await socket.leave(room(orderId));
       return { ok: false, error: 'unavailable' };
     }
-    // Unknown and foreign orders get the same answer.
-    if (!order) return { ok: false, error: 'not_found' };
-
-    await socket.join(room(orderId));
-    return { ok: true, orderId, ...order };
   }
 }

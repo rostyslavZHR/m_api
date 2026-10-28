@@ -197,6 +197,28 @@ curl -i -X POST http://localhost:3000/orders \
 
 Both 400s above come from the spec, not from code — there is no `if` anywhere in `src/` that checks for the `Idempotency-Key` header or inspects `items`. The validator rejects both requests before they reach a controller, purely because the spec declares the header `required: true` and `items` with `minItems: 1`.
 
+## Real-time demo (HW#18)
+
+With the app running (`npm start`, seeded as above), one script checks Socket.IO room isolation end to end. It needs no build step:
+
+```bash
+node scripts/realtime-demo.mjs; echo "exit=$?"
+# A_RECEIVED=1
+# B_RECEIVED=0
+# exit=0
+
+node scripts/realtime-demo.mjs --same-room; echo "exit=$?"
+# A_RECEIVED=1
+# B_RECEIVED=1
+# exit=0
+```
+
+Each run creates two fresh orders, A and B, for seeded user 1. It connects two clients to the `/orders` namespace as that user, joins client A to order A's room, and joins client B to order B's room (or to A's room with `--same-room`, the control run). Then it moves A from `paid` to `processing` over HTTP. stdout carries only the two lines; progress goes to stderr (`2>/dev/null` hides it).
+
+- **Exit codes:** `0` = as expected. `1` = not as expected; the two lines are still printed. `2` = setup failed, so there's no verdict: the app is down, a connect or join was refused, an ack didn't arrive, or a checkout or the PATCH failed. No result lines are printed in that case.
+- **Timing:** the whole run takes under a second. A broken setup ends within 15 s at most.
+- **Configuration:** `DEMO_BASE_URL` (default `http://localhost:3000`) and `DEMO_USER_ID` (default `1`).
+
 ## Database: schema, seed, indexes
 
 Main table: orders (100,000 rows). Search table: products (100,000 rows).
@@ -462,6 +484,7 @@ CI uses environments (`record-deployment`, `--to-environment`) rather than the t
 - **Idempotency-Key replays are kept in memory:** per process, lost on restart, and two simultaneous requests with the same key can both create an order. A table with a unique key on the idempotency key is the durable version.
 - **`app-v1-password` lives in two places:** `init.sql` (the testkit reads it from there and hands it to the test app through `DB_PASSWORD_FILE`) and the Grading setup's `secrets/db_password` for running the app itself.
 - **The provider version is the commit SHA,** which only identifies the code on a clean tree: uncommitted changes get verified and published under `HEAD`'s SHA.
+- **One throwing bus subscriber takes the whole API down:** the order-events bus is an RxJS `Subject`, and a throw inside any subscriber's callback becomes an uncaught exception that exits Node. Seen in HW#18 (Phase D, deliberate failure 5): the PATCH had already committed, its client got a dropped connection, and every other request failed until a restart. That's why the gateway's and SSE's bus callbacks only emit or push, with nothing that can throw; anything heavier there needs its own try/catch.
 - **No persistent broker is configured yet:** until `PACT_BROKER_URL`/`PACT_BROKER_TOKEN` secrets point at one (PactFlow, or a self-hosted broker), CI checks only this commit's consumer/provider pair, not the consumer against what is actually in production.
 
 ## Configuration
