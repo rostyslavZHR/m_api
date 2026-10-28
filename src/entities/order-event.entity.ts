@@ -19,6 +19,11 @@ export class OrderEventEntity {
   })
   id: string; // bigint → string in pg; also the SSE event id
 
+  // order_id declared twice, as in OrderItemEntity: the column gives the id without
+  // a join, the relation keeps the FK.
+  @Column('bigint', { name: 'order_id' })
+  orderId: string;
+
   @ManyToOne(() => OrderEntity, { onDelete: 'CASCADE', nullable: false })
   @JoinColumn({ name: 'order_id' })
   order: Relation<OrderEntity>;

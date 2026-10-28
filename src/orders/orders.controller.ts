@@ -15,7 +15,7 @@ import {
   OrdersService,
   type UpdateOrderStatus,
 } from './orders.service.js';
-import { interval, map, merge, type Observable } from 'rxjs';
+import { catchError, EMPTY, interval, map, merge, type Observable } from 'rxjs';
 
 @Controller('orders')
 export class OrdersController {
@@ -62,6 +62,12 @@ export class OrdersController {
     // the first one also tells the client to reconnect after 1 s. The `: ping` comment
     // every 15 s keeps idle connections from being closed by proxies; clients ignore it.
     // Unsubscribing from the merge stops both.
+    //
+    // catchError: on an error after the headers, Nest would write `event: error` with
+    // the raw err.message (e.g. DB connection details) and an `id:` from its own
+    // counter, which would become the client's Last-Event-ID. Ending the stream
+    // instead sends nothing; EventSource reconnects with its real Last-Event-ID. The
+    // service has already logged the error.
     return merge(
       events.pipe(
         map((event, i) => ({
@@ -72,6 +78,6 @@ export class OrdersController {
         })),
       ),
       interval(15_000).pipe(map(() => ({ comment: 'ping' }))),
-    );
+    ).pipe(catchError(() => EMPTY));
   }
 }

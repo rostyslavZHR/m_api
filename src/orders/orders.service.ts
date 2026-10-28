@@ -3,6 +3,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
@@ -71,6 +72,8 @@ const toOrder = (entity: OrderEntity): Order => ({
 
 @Injectable()
 export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name);
+
   // Replays for Idempotency-Key. In memory, so per process and lost on restart;
   // a table with a unique key is the durable version.
   private readonly idempotencyKeys = new Map<
@@ -209,7 +212,8 @@ export class OrdersService {
       };
 
       // 1. Subscribe to live first: the other way round, an event committed during
-      // the history read would be lost.
+      // the history read would be lost. Keep the callback trivial (push or send): a
+      // throw inside a Subject subscriber is an uncaught exception that crashes Node.
       const live = this.ordersEventBus
         .forOrder(orderId)
         .subscribe((event) => (buffer ? buffer.push(event) : send(event)));
@@ -223,7 +227,10 @@ export class OrdersService {
           buffer!.forEach(send); // only this callback sets it to null, below
           buffer = null;
         })
-        .catch((err) => subscriber.error(err));
+        .catch((err) => {
+          this.logger.error(err); // the details stay here; the controller ends the stream
+          subscriber.error(err);
+        });
 
       // 3. Teardown: Nest unsubscribes when the client disconnects; without this, every
       // closed connection would leave a listener on the bus.

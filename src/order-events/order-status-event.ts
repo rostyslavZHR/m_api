@@ -15,7 +15,7 @@ export interface OrderStatusEvent {
 // exact, and comparing "greater than Last-Event-ID" works on numbers.
 export const toStatusEvent = (event: OrderEventEntity): OrderStatusEvent => ({
   eventId: Number(event.id),
-  orderId: Number(event.order.id),
+  orderId: Number(event.orderId),
   from: event.fromStatus,
   to: event.toStatus,
   at: event.createdAt.toISOString(),

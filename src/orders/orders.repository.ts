@@ -102,22 +102,21 @@ export class OrdersRepository {
   insertEvent({ orderId, from, to }: NewOrderEvent): Promise<OrderEventEntity> {
     return this.manager.save(
       this.manager.create(OrderEventEntity, {
+        orderId,
         fromStatus: from,
         toStatus: to,
-        order: { id: orderId },
       }),
     );
   }
 
   // Replay for SSE: strictly after afterId (the client already has that one),
-  // oldest first. Loads `order` because toStatusEvent reads event.order.id.
+  // oldest first. No join: the event carries orderId itself.
   findOrderEvents({
     orderId,
     afterId,
   }: FindOrderEvents): Promise<OrderEventEntity[]> {
     return this.manager.find(OrderEventEntity, {
-      where: { order: { id: orderId }, id: MoreThan(afterId) },
-      relations: { order: true },
+      where: { orderId, id: MoreThan(afterId) },
       order: { id: 'ASC' },
     });
   }
