@@ -597,4 +597,3 @@ The multi-stage [Dockerfile](Dockerfile) only copies `dist/`, `package*.json`, `
 | `package.json` | ESM (`"type": "module"`), `scripts.start` runs `nest build && node dist/main.js` |
 | `.gitignore`, `.dockerignore` | `.env`/`secrets`/`backups` excluded from both git and the Docker build context |
 
-1
