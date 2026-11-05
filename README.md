@@ -2,7 +2,7 @@
 
 ## Contract part: Variant B — runtime validation at the boundary
 
-[src/](src/) is a NestJS application (Express platform under the hood) with in-memory data (4 products, 5 orders, split into `ProductsModule` and `OrdersModule`). `express-openapi-validator` is mounted as raw Express middleware in [src/main.ts](src/main.ts) and validates every request and every response against [openapi/openapi.yaml](openapi/openapi.yaml). Errors are translated to `application/problem+json` in two places: a global Nest exception filter ([src/common/problem-exception.filter.ts](src/common/problem-exception.filter.ts)) for exceptions thrown inside controllers/services, and a small fallback error-handling middleware in `main.ts` for the validator's own errors, since those are raised before Nest's router runs and never reach the filter.
+[src/](src/) is a NestJS application (Express platform under the hood) on Postgres through TypeORM (see [TypeORM data layer](#typeorm-data-layer)), split into `ProductsModule` and `OrdersModule`. `express-openapi-validator` is mounted as raw Express middleware in [src/main.ts](src/main.ts) and validates every request and every response against [openapi/openapi.yaml](openapi/openapi.yaml). Errors are translated to `application/problem+json` in two places: a global Nest exception filter ([src/common/problem-exception.filter.ts](src/common/problem-exception.filter.ts)) for exceptions thrown inside controllers/services, and a small fallback error-handling middleware in `main.ts` for the validator's own errors, since those are raised before Nest's router runs and never reach the filter.
 
 ## Grading
 
@@ -685,7 +685,7 @@ The multi-stage [Dockerfile](Dockerfile) only copies `dist/`, `package*.json`, `
 |---|---|
 | `openapi/openapi.yaml` | spec: 2 resources (`/products`, `/orders`), cursor pagination, Idempotency-Key, problem+json; `PATCH /orders/{id}/status` and the `text/event-stream` route `GET /orders/{id}/events` |
 | `src/main.ts` | bootstraps Nest, mounts `express-openapi-validator` and the fallback error handler |
-| `src/products/`, `src/orders/` | one Nest module (controller + service) per resource, in-memory data |
+| `src/products/`, `src/orders/` | one Nest module (controller + service + repository) per resource, on Postgres through TypeORM |
 | `src/common/` | shared `problem+json` builder and the global exception filter |
 | `src/config/env.schema.ts` | zod schema for all env vars, fail-fast `validate()` |
 | `src/db/` | `DbModule`/`DbService`/`DbController` — the app's DataSource (`app-data-source.ts`), `/db` health query |
