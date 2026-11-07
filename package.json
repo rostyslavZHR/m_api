@@ -21,6 +21,7 @@
     "migrate:generate": "bash scripts/with-secrets.sh dev typeorm migration:generate -d dist/data-source.js",
     "seed": "bash scripts/with-secrets.sh dev node dist/seed.js",
     "rabbitmq:smoke": "bash scripts/with-secrets.sh dev node scripts/rabbitmq-smoke.mjs",
+    "rabbitmq:bootstrap": "bash scripts/with-secrets.sh dev node dist/rabbitmq-bootstrap.js",
     "demo:nplus1": "bash scripts/with-secrets.sh dev node dist/demo-nplus1.js",
     "report": "bash scripts/with-secrets.sh dev node dist/report.js",
     "demo:race": "node --env-file-if-exists=.env dist/demo-race.js",
