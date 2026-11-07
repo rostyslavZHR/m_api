@@ -13,7 +13,11 @@ import {
   InsufficientFundsError,
   OutOfStockError,
 } from '../checkout/checkout.errors.js';
-import type { OrderEntity, OrderStatus } from '../entities/index.js';
+import type {
+  OrderEntity,
+  OrderEventEntity,
+  OrderStatus,
+} from '../entities/index.js';
 import { OrdersRepository } from './orders.repository.js';
 import { ORDER_TRANSITIONS } from '../entities/order.entity.js';
 import { OrderEventsBus } from '../order-events/order-events.bus.js';
@@ -22,6 +26,8 @@ import {
   toStatusEvent,
 } from '../order-events/order-status-event.js';
 import { Observable } from 'rxjs';
+import { toOrderPlacedEvent } from '../messaging/order-placed.js';
+import { OrderPlacedPublisher } from '../messaging/order-placed.publisher.js';
 
 // The OrderItem, Order and CreateOrder schemas in openapi/openapi.yaml.
 interface OrderItem {
@@ -95,6 +101,7 @@ export class OrdersService {
     private readonly dataSource: DataSource,
     private readonly orders: OrdersRepository,
     private readonly ordersEventBus: OrderEventsBus,
+    private readonly orderPlacedPublisher: OrderPlacedPublisher,
   ) {}
 
   async getById(id: number): Promise<Order> {
@@ -159,7 +166,34 @@ export class OrdersService {
     // Read back, so the response is what the database holds.
     const order = await this.getById(Number(created.id));
     this.idempotencyKeys.set(idempotencyKey, { body, order });
+
+    // Here, not inside checkout(): its transaction has committed, and the retry
+    // wrapper can't run it again. A rolled-back attempt never gets this far, and an
+    // Idempotency-Key replay returned above without publishing.
+    await this.announceOrderPlaced(created.id);
     return order;
+  }
+
+  // Best effort: the order is committed whatever happens here, so nothing in this
+  // method fails the request. The publisher logs its own failures; a lost event is
+  // the documented gap until the outbox (HW#22).
+  private async announceOrderPlaced(orderId: string): Promise<void> {
+    let creation: OrderEventEntity | null;
+    try {
+      creation = await this.orders.findCreationEvent(orderId);
+    } catch (error) {
+      this.logger.error(
+        `order.placed not published: orderId=${orderId}: reading it failed: ${(error as Error).message}`,
+      );
+      return;
+    }
+    if (!creation) {
+      this.logger.error(
+        `order.placed not published: orderId=${orderId} has no creation event`,
+      );
+      return;
+    }
+    await this.orderPlacedPublisher.publish(toOrderPlacedEvent(creation));
   }
 
   async updateStatus({ id, to }: UpdateStatus): Promise<Order> {
