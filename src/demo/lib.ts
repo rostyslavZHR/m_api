@@ -19,7 +19,9 @@ import {
   UNROUTED_QUEUE,
 } from '../messaging/topology.js';
 
-const DEADLINE_MS = 30_000;
+// Well above a normal run (~4 s), and above the inner waits added up (ready 10 s +
+// settle 10 s + depth reads), so a slow machine fails a check, not the deadline.
+const DEADLINE_MS = 60_000;
 const CONSUMER_ENTRY = fileURLToPath(
   new URL('../consumer/main.js', import.meta.url),
 );
@@ -74,7 +76,8 @@ export const printResults = (results: [string, string | number][]) => {
 export const checker = () => {
   const failures: string[] = [];
   return {
-    check(label: string, ok: boolean) {
+    // Arrow functions, so the demos can destructure them.
+    check: (label: string, ok: boolean) => {
       log(`${ok ? 'ok  ' : 'FAIL'} ${label}`);
       if (!ok) failures.push(label);
     },

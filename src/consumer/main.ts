@@ -89,10 +89,10 @@ async function handle(
   try {
     outcome = await insertInvoice(dataSource, parsed.event);
   } catch (error) {
-    const code = (error as { code?: unknown }).code ?? 'no code';
+    const code = (error as { code?: unknown }).code;
     return reject(
       !isPermanent(error),
-      `${String(code)}: ${(error as Error).message}`,
+      `${typeof code === 'string' ? code : 'no code'}: ${(error as Error).message}`,
     );
   }
 
