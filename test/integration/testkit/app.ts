@@ -20,6 +20,9 @@ export async function createTestApp(db: TestDatabase): Promise<NestExpressApplic
   // first imported. A static import would run before this line and take
   // DB_URL from .env: PgBouncer and the dev database.
   process.env.DB_URL = db.appUrl;
+  // Required by the env schema. The suites don't use RabbitMQ: a port nothing
+  // listens on, so they never depend on a running broker.
+  process.env.RABBITMQ_URL = 'amqp://127.0.0.1:1';
   const { AppModule } = await import('../../../src/app.module.js');
 
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();

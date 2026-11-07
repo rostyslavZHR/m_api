@@ -76,6 +76,33 @@ services:
       timeout: 3s
       retries: 20
 
+  # The broker for order.placed (HW#19). Dev-only credentials, like db's above. The
+  # policies (dead-lettering, delivery limit) aren't here: scripts/rabbitmq-policies.sh
+  # sets them with rabbitmqctl, because a definitions file loaded at boot would skip
+  # the default user and vhost below.
+  rabbitmq:
+    image: rabbitmq:4.3.7-management
+    # The node name, and so the data directory, comes from the hostname. A fixed one
+    # keeps the volume's queues visible across container recreation.
+    hostname: rabbitmq
+    ports:
+      - "21113:5672"                                       # AMQP
+      - "21114:15672"                                      # management UI and HTTP API, not AMQP
+    environment:
+      RABBITMQ_DEFAULT_USER: app
+      RABBITMQ_DEFAULT_PASS: rabbitmq-dev-only
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      # The node accepts commands, not just an open port: right after boot the
+      # port is open while connections still get ECONNRESET.
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
 volumes:
   pgdata:
   pact-broker-data:
+  rabbitmq-data:

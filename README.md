@@ -6,7 +6,7 @@
 
 ## Grading
 
-The DB scripts normally load credentials from the local store through `scripts/with-secrets.sh`. On a fresh clone there is no store, so the values come from the environment instead (`SKIP_VAULT=1`). They're the dev-only bootstrap account committed in [docker-compose.yml](docker-compose.yml), not a secret.
+The DB scripts, the RabbitMQ scripts and the app normally load credentials from the local store through `scripts/with-secrets.sh`. On a fresh clone there is no store, so the values come from the environment instead (`SKIP_VAULT=1`). They're the dev-only bootstrap accounts committed in [docker-compose.yml](docker-compose.yml), not secrets. The environment takes precedence over `.env`, whose `RABBITMQ_URL` is only a placeholder.
 
 ```bash
 docker compose up -d --wait
@@ -14,6 +14,7 @@ docker compose up -d --wait
 export DB_URL=postgres://app_user@localhost:21111/shop
 export SKIP_VAULT=1
 export MIGRATIONS_DB_URL=postgres://admin:admin-bootstrap-only@localhost:21110/shop
+export RABBITMQ_URL=amqp://app:rabbitmq-dev-only@127.0.0.1:21113
 
 cp .env.example .env
 mkdir -p secrets && printf 'app-v1-password' > secrets/db_password
@@ -100,7 +101,7 @@ grep -rnE "PACT_BROKER_TOKEN[\"']?[[:space:]]*[:=][[:space:]]*[\"'][^\"'$]" --in
 
 ### HW#18: real-time order status
 
-Run this after the setup at the top of [Grading](#grading): DB up, `.env` and `secrets/db_password` in place, migrations applied, `npm run seed` done. Start the app in a second terminal. The build is `tsc`, through `nest build`; `tsx` would not work, because it doesn't emit the decorator metadata Nest's dependency injection needs:
+Run this after the setup at the top of [Grading](#grading): DB up, `.env` and `secrets/db_password` in place, migrations applied, `npm run seed` done. Start the app in a second terminal, after running the same `export` lines there: the app needs `RABBITMQ_URL`, and fails fast at startup without a valid one. The build is `tsc`, through `nest build`; `tsx` would not work, because it doesn't emit the decorator metadata Nest's dependency injection needs:
 
 ```bash
 npm run build && node dist/main.js     # listens on PORT from .env: http://localhost:3000
@@ -191,10 +192,10 @@ Requires Node 24+ (`check:env` relies on Node's built-in TypeScript type strippi
 
 ```bash
 npm install
-npm start
+bash scripts/with-secrets.sh dev     # with no command, the wrapper runs npm start
 ```
 
-The server listens on `http://localhost:3000`.
+The server listens on `http://localhost:3000`. Start it through the wrapper: it provides `RABBITMQ_URL` from the secrets store, or from the environment with `SKIP_VAULT=1`, as in [Grading](#grading). `.env` holds only a placeholder for it (`amqp://USER:PASSWORD@…`). It's a well-formed URL, so a plain `npm start` boots, but the broker refuses that login. Without any `RABBITMQ_URL` at all, the app stops at startup with `Invalid environment variables: RABBITMQ_URL`.
 
 ## Verify
 
