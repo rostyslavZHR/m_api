@@ -148,6 +148,25 @@ node scripts/realtime-demo.mjs --same-room; echo "exit=$?"   # A_RECEIVED=1  B_R
 
 The [trade-offs](#trade-offs-websocket-vs-sse) and the [known gaps](#real-time-known-gaps) are further down.
 
+### HW#19: RabbitMQ order.placed
+
+Run after the setup at the top of [Grading](#grading): the same `export` lines, `npm run build` (the demos run from `dist/`) and `npm run migrate` (it creates the `invoices` table) done, and `npm run seed`. The API doesn't need to be running: each demo places its orders through the app's own `OrdersService` and starts the consumer itself.
+
+```bash
+npm run rabbitmq:smoke                    # RabbitMQ 4.3.7, confirm channel open
+npm run demo:publish; echo "exit=$?"
+npm run demo:dlq; echo "exit=$?"
+npm run demo:duplicate; echo "exit=$?"
+```
+
+| Demo | stdout (exactly these lines) | Takes |
+|---|---|---|
+| `demo:publish` | `published=5` `delivered=5` `effect=5` `acked=5` `dlq=0` `prefetch=10` | ~4 s |
+| `demo:dlq` | `rejected=1` `work=0` `dlq=1` `dlq-reason=rejected` `effect=0` | ~4 s |
+| `demo:duplicate` | `deliveries=2` `effect=1` `skipped=1` | ~2 s |
+
+Exit codes: `0` every check held, `1` a check failed (the lines are still printed, and stderr names the failed check), `2` setup failed (broker or DB unreachable: a few seconds at most, no result lines). Details in [RabbitMQ demos](#rabbitmq-demos).
+
 ## TypeORM data layer
 
 The HW#12 schema as entities in [src/entities/](src/entities/), created by the migration in [src/migrations/](src/migrations/). `synchronize: false` in [src/data-source.ts](src/data-source.ts): the schema changes only through reviewed migrations.
@@ -322,6 +341,27 @@ Checkout publishes an `order.placed` event to RabbitMQ, and a separate consumer 
 
 - **Run `npm run rabbitmq:bootstrap` before starting the consumer.** The bootstrap sets the policies; the consumer only declares exchanges and queues, and AMQP can't set policies. Without them, the work queue `shop.invoicing` has no dead-letter exchange, only quorum's built-in delivery limit of 20, so a poison message is **dropped** after 20 attempts instead of being parked in `shop.dlq`. The demos run the full bootstrap themselves. It's safe to re-run.
 - **`shop.unrouted` should stay empty.** It's the catch-all behind the events exchange's alternate exchange. A non-zero depth means a publisher sends a routing key that no queue is bound to. Check it with `docker compose exec -T rabbitmq rabbitmqctl -q list_queues name messages`, or in the UI at http://localhost:21114.
+
+### The consumer
+
+`npm run consumer` (after `npm run build` and `npm run rabbitmq:bootstrap`) runs [src/consumer/main.ts](src/consumer/main.ts) as its own process, with its own DB pool and AMQP connection. For each `order.placed` it writes one row to `invoices` with `INSERT … ON CONFLICT (event_id) DO NOTHING`, then acks. So a redelivered event inserts nothing and is acked as `skipped`.
+
+- **Prefetch 10:** up to 10 unacked deliveries at once, each one `INSERT` (well under a second), so far below the 30-minute `consumer_timeout`. Its DB pool is 10 too, so no delivery waits for a connection.
+- **Poison → DLQ at once** (`reject` without requeue): a body that isn't JSON, a payload that doesn't parse as `order.placed` v1, or a data or integrity error from Postgres (an `orderId` that doesn't exist).
+- **Transient errors → requeue** (`reject` with requeue: the connection, a timeout, a serialization failure), bounded by the work queue's `delivery-limit` of 5. Then it's dead-lettered with `x-first-death-reason=delivery_limit`. Never `nack`: on quorum queues it doesn't count toward the limit.
+- **SIGTERM / Ctrl-C** stops it cleanly: no new deliveries, the ones in flight finish and are acked, then it closes. If it loses the broker it exits with code 1, and its unacked deliveries go back to the queue.
+- stdout carries one JSON line per delivery and per outcome (what the demos count); logs go to stderr.
+- `CONSUMER_CRASH_AFTER_EFFECT=1` is **demo-only**: the consumer kills itself with SIGKILL after the invoice commits and before the ack. Only `demo:duplicate` sets it.
+
+### RabbitMQ demos
+
+Each demo resets first: it runs the bootstrap (policies and topology; the grader never runs it separately), then purges `shop.invoicing`, `shop.dlq` and `shop.unrouted`. Database rows aren't deleted: the effect is counted from `invoices` for this run's event ids only, and every run's events are new. Orders are placed through `OrdersService.create` in a Nest application context (no HTTP server), as the seeded `user3@example.com`, whose balance each run resets. The product is the cheapest one with enough stock; a run takes 1–5 units, so the seed's stock lasts for well over 100 runs, and `npm run seed` restores it.
+
+- **`demo:publish`** places 5 orders (5 events, confirmed by the broker), then starts the consumer, waits for 5 acks, stops it, and measures: the invoices from the DB, the queue depths from the broker. `prefetch` is what the consumer reported after setting it.
+- **`demo:dlq`** publishes one `order.placed` with `version: 2`, which the consumer doesn't know, and waits for the reject. Then it reads `x-first-death-reason` from the DLQ's head without removing it: `get`, read the headers, `nack` with requeue. Not `reject`, which would count toward the DLQ's own delivery limit.
+- **`demo:duplicate`** places 1 order and starts the consumer with the crash switch. The consumer writes the invoice and dies by SIGKILL before acking, and the demo checks the exit signal. A second consumer gets the redelivery (`redelivered: true`), finds the invoice already there and skips it.
+
+Depths are read with `checkQueue` after the consumer has stopped (it counts ready messages only, so nothing may be unacked), and polled until they stay the same for 1 s (dead-lettering is asynchronous). Besides the contract's invariants, each demo also checks what would otherwise pass on wrong numbers: `delivered` and `acked` equal `published` and the work queue is empty (catches a stale message); the poison was rejected without requeue; the first consumer really died by SIGKILL and the redelivery was skipped, not rejected.
 
 ## Database: schema, seed, indexes
 
