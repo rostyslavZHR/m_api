@@ -106,3 +106,4 @@ volumes:
   pgdata:
   pact-broker-data:
   rabbitmq-data:
+  
