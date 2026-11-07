@@ -1,10 +1,18 @@
 import { z } from 'zod';
 import type { OrderEventEntity } from '../entities/index.js';
 
-// The order.placed contract, version 1: the publisher builds it, the consumer
-// (Phase E) validates incoming messages against the same schema. Every field is
-// chosen here on purpose, never a spread of an ORM entity, so a new column can't
-// leak into the message and consumers don't depend on the table layout.
+// The order.placed contract, version 1. Every field is chosen here on purpose,
+// never a spread of an ORM entity, so a new column can't leak into the message and
+// consumers don't depend on the table layout.
+//
+// One shape, two schemas:
+//   - orderPlacedSchema (strict): what the producer may send. An unplanned field
+//     is an error, so nothing leaks out by accident.
+//   - orderPlacedReader (tolerant): what a consumer parses with. Unknown fields are
+//     stripped, not rejected: when the producer adds an optional field to v1 (a
+//     backward-compatible change), old consumers keep working instead of sending
+//     every message to the DLQ. Only an unknown type or version, or a missing or
+//     invalid required field, is poison.
 
 // Integer minor units as a decimal string: the columns are bigint, which a JSON
 // number can't carry exactly past 2^53. Never a float. No currency field: the
@@ -12,7 +20,19 @@ import type { OrderEventEntity } from '../entities/index.js';
 const cents = z.string().regex(/^\d+$/);
 const id = z.number().int().positive();
 
-export const orderPlacedSchema = z.strictObject({
+const itemShape = {
+  productId: id,
+  quantity: z.number().int().positive(),
+  unitPriceCents: cents,
+};
+
+const dataShape = {
+  orderId: id,
+  userId: id,
+  totalCents: cents,
+};
+
+const envelopeShape = {
   // The order's creation event (order_events.id): written in the checkout
   // transaction, so it's the same on every publish attempt for this order.
   eventId: z.string().regex(/^\d+$/),
@@ -21,19 +41,22 @@ export const orderPlacedSchema = z.strictObject({
   // When the order was placed: the creation row's created_at, not the publish
   // time, so two publishes of one eventId carry the same body.
   occurredAt: z.iso.datetime(),
+};
+
+export const orderPlacedSchema = z.strictObject({
+  ...envelopeShape,
   data: z.strictObject({
-    orderId: id,
-    userId: id,
-    totalCents: cents,
-    items: z
-      .array(
-        z.strictObject({
-          productId: id,
-          quantity: z.number().int().positive(),
-          unitPriceCents: cents,
-        }),
-      )
-      .min(1),
+    ...dataShape,
+    items: z.array(z.strictObject(itemShape)).min(1),
+  }),
+});
+
+// z.object strips unknown keys (zod's default), at every level.
+export const orderPlacedReader = z.object({
+  ...envelopeShape,
+  data: z.object({
+    ...dataShape,
+    items: z.array(z.object(itemShape)).min(1),
   }),
 });
 
