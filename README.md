@@ -316,6 +316,13 @@ Each run creates two fresh orders, A and B, for seeded user 1. It connects two c
 
 **Two or more instances:** the bus is an in-process `Subject`, so an event is published only on the instance that handled the PATCH. SSE streams and Socket.IO rooms on the other instances never get it live. SSE clients catch up from the table only after a reconnect, and a healthy idle stream never reconnects on its own, so they can miss events for as long as the connection stays up. WebSocket clients don't catch up at all. On top of that, Socket.IO's long-polling handshake fails unless every request of a session reaches the same instance. The fix is to feed every instance's bus from a broker (Redis pub/sub, or Postgres `LISTEN/NOTIFY` on the `order_events` insert); for Socket.IO rooms, the Redis adapter does that job. Socket.IO also needs sticky sessions, or clients that connect over `transports: ['websocket']` only.
 
+## RabbitMQ: order.placed (HW#19)
+
+Checkout publishes an `order.placed` event to RabbitMQ, and a separate consumer process turns each one into an invoice. The full section comes with the last phase. For now, two operating rules:
+
+- **Run `npm run rabbitmq:bootstrap` before starting the consumer.** The bootstrap sets the policies; the consumer only declares exchanges and queues, and AMQP can't set policies. Without them, the work queue `shop.invoicing` has no dead-letter exchange, only quorum's built-in delivery limit of 20, so a poison message is **dropped** after 20 attempts instead of being parked in `shop.dlq`. The demos run the full bootstrap themselves. It's safe to re-run.
+- **`shop.unrouted` should stay empty.** It's the catch-all behind the events exchange's alternate exchange. A non-zero depth means a publisher sends a routing key that no queue is bound to. Check it with `docker compose exec -T rabbitmq rabbitmqctl -q list_queues name messages`, or in the UI at http://localhost:21114.
+
 ## Database: schema, seed, indexes
 
 Main table: orders (100,000 rows). Search table: products (100,000 rows).

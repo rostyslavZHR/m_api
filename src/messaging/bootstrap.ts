@@ -32,12 +32,16 @@ export async function bootstrapRabbitMQ(url: string): Promise<void> {
     ALTERNATE_EXCHANGE,
   ]);
 
+  // A short-lived connection: the declared objects live on the broker (durable,
+  // in its volume), not in this process, so closing afterwards removes nothing.
   const connection = await connect(url, { timeout: 5_000 });
   try {
     const channel = await connection.createChannel();
     await declareTopology(channel);
+    // Skipped if a declaration failed: the broker has already closed the channel.
     await channel.close();
   } finally {
+    // Always: an open connection would keep Node running and hold a slot on the broker.
     await connection.close();
   }
 }

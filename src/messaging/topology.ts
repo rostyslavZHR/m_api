@@ -43,7 +43,9 @@ export async function declareTopology(channel: Channel): Promise<void> {
     durable: true,
     arguments: QUORUM,
   });
-  // No dead-letter exchange of its own, so a dead letter can't loop.
+  // Only the work queue gets a dead-letter exchange, from its policy, whose
+  // pattern matches that one name. Nothing gives the DLQ one, so a dead letter
+  // can't loop back into it.
   await channel.assertQueue(DEAD_LETTER_QUEUE, {
     durable: true,
     arguments: QUORUM,

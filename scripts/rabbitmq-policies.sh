@@ -11,6 +11,12 @@
 #
 #   bash scripts/rabbitmq-policies.sh <work-queue> <dead-letter-exchange> <delivery-limit> <events-exchange> <alternate-exchange>
 #
+# This is the dev-sized way to apply them. Policies themselves are standard in
+# production; there they're usually managed as infrastructure-as-code instead: a
+# definitions file imported at deploy, Terraform's RabbitMQ provider, the Kubernetes
+# Messaging Topology Operator (a Policy resource), or the management HTTP API called
+# from a deploy pipeline.
+#
 # Safe to re-run: set_policy replaces a policy of the same name. Exits non-zero on
 # any failure. Each pattern is anchored to one name: a broader one (^shop\.) would
 # also match the dead-letter queue, which would then dead-letter into itself. Only the
