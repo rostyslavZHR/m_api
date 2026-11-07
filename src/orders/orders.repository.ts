@@ -1,4 +1,4 @@
-import { type EntityManager, MoreThan } from 'typeorm';
+import { type EntityManager, IsNull, MoreThan } from 'typeorm';
 
 import {
   OrderEntity,
@@ -123,6 +123,16 @@ export class OrdersRepository {
     return this.manager.find(OrderEventEntity, {
       where: { orderId, id: MoreThan(afterId) },
       order: { id: 'ASC' },
+    });
+  }
+
+  // The order's creation event (from_status null, written by checkout) with the
+  // order, its items and its user: what order.placed is built from, read after
+  // the commit, so the event describes what the database holds.
+  findCreationEvent(orderId: string): Promise<OrderEventEntity | null> {
+    return this.manager.findOne(OrderEventEntity, {
+      where: { orderId, fromStatus: IsNull() },
+      relations: { order: { items: true, user: true } },
     });
   }
 

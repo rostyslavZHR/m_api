@@ -6,7 +6,7 @@
 
 ## Grading
 
-The DB scripts normally load credentials from the local store through `scripts/with-secrets.sh`. On a fresh clone there is no store, so the values come from the environment instead (`SKIP_VAULT=1`). They're the dev-only bootstrap account committed in [docker-compose.yml](docker-compose.yml), not a secret.
+The DB scripts, the RabbitMQ scripts and the app normally load credentials from the local store through `scripts/with-secrets.sh`. On a fresh clone there is no store, so the values come from the environment instead (`SKIP_VAULT=1`). They're the dev-only bootstrap accounts committed in [docker-compose.yml](docker-compose.yml), not secrets. The environment takes precedence over `.env`, whose `RABBITMQ_URL` is only a placeholder.
 
 ```bash
 docker compose up -d --wait
@@ -14,6 +14,7 @@ docker compose up -d --wait
 export DB_URL=postgres://app_user@localhost:21111/shop
 export SKIP_VAULT=1
 export MIGRATIONS_DB_URL=postgres://admin:admin-bootstrap-only@localhost:21110/shop
+export RABBITMQ_URL=amqp://app:rabbitmq-dev-only@127.0.0.1:21113
 
 cp .env.example .env
 mkdir -p secrets && printf 'app-v1-password' > secrets/db_password
@@ -100,7 +101,7 @@ grep -rnE "PACT_BROKER_TOKEN[\"']?[[:space:]]*[:=][[:space:]]*[\"'][^\"'$]" --in
 
 ### HW#18: real-time order status
 
-Run this after the setup at the top of [Grading](#grading): DB up, `.env` and `secrets/db_password` in place, migrations applied, `npm run seed` done. Start the app in a second terminal. The build is `tsc`, through `nest build`; `tsx` would not work, because it doesn't emit the decorator metadata Nest's dependency injection needs:
+Run this after the setup at the top of [Grading](#grading): DB up, `.env` and `secrets/db_password` in place, migrations applied, `npm run seed` done. Start the app in a second terminal, after running the same `export` lines there: the app needs `RABBITMQ_URL`, and fails fast at startup without a valid one. The build is `tsc`, through `nest build`; `tsx` would not work, because it doesn't emit the decorator metadata Nest's dependency injection needs:
 
 ```bash
 npm run build && node dist/main.js     # listens on PORT from .env: http://localhost:3000
@@ -147,6 +148,39 @@ node scripts/realtime-demo.mjs --same-room; echo "exit=$?"   # A_RECEIVED=1  B_R
 
 The [trade-offs](#trade-offs-websocket-vs-sse) and the [known gaps](#real-time-known-gaps) are further down.
 
+### HW#19: RabbitMQ order.placed
+
+Self-contained: from a fresh clone, in the repository root (where `package.json` is). The API doesn't need to be running: each demo places its orders through the app's own `OrdersService` and starts the consumer itself. `npm run build` is required (the demos run from `dist/`), and so is `npm run migrate` (it creates the `invoices` table).
+
+```bash
+docker compose up -d --wait
+
+export DB_URL=postgres://app_user@localhost:21111/shop
+export MIGRATIONS_DB_URL=postgres://admin:admin-bootstrap-only@localhost:21110/shop
+export RABBITMQ_URL=amqp://app:rabbitmq-dev-only@127.0.0.1:21113
+export SKIP_VAULT=1
+
+cp .env.example .env
+mkdir -p secrets && printf 'app-v1-password' > secrets/db_password
+
+npm ci
+npm run build
+npm run migrate
+npm run seed
+
+npm run demo:publish; echo "exit=$?"
+npm run demo:dlq; echo "exit=$?"
+npm run demo:duplicate; echo "exit=$?"
+```
+
+| Demo | stdout (exactly these lines) | Takes |
+|---|---|---|
+| `demo:publish` | `published=5` `delivered=5` `effect=5` `acked=5` `dlq=0` `prefetch=10` | ~4 s |
+| `demo:dlq` | `rejected=1` `work=0` `dlq=1` `dlq-reason=rejected` `effect=0` | ~4 s |
+| `demo:duplicate` | `deliveries=2` `effect=1` `skipped=1` | ~2 s |
+
+Exit codes: `0` every check held, `1` a check failed (the lines are still printed, and stderr names the failed check), `2` setup failed (broker or DB unreachable: a few seconds at most, no result lines). `npm run rabbitmq:smoke` checks the broker connection on its own (`RabbitMQ 4.3.7, confirm channel open`). Details in [Async events via RabbitMQ](#async-events-via-rabbitmq).
+
 ## TypeORM data layer
 
 The HW#12 schema as entities in [src/entities/](src/entities/), created by the migration in [src/migrations/](src/migrations/). `synchronize: false` in [src/data-source.ts](src/data-source.ts): the schema changes only through reviewed migrations.
@@ -191,10 +225,10 @@ Requires Node 24+ (`check:env` relies on Node's built-in TypeScript type strippi
 
 ```bash
 npm install
-npm start
+bash scripts/with-secrets.sh dev     # with no command, the wrapper runs npm start
 ```
 
-The server listens on `http://localhost:3000`.
+The server listens on `http://localhost:3000`. Start it through the wrapper: it provides `RABBITMQ_URL` from the secrets store, or from the environment with `SKIP_VAULT=1`, as in [Grading](#grading). `.env` holds only a placeholder for it (`amqp://USER:PASSWORD@…`). It's a well-formed URL, so a plain `npm start` boots, but the broker refuses that login. Without any `RABBITMQ_URL` at all, the app stops at startup with `Invalid environment variables: RABBITMQ_URL`.
 
 ## Verify
 
@@ -314,6 +348,162 @@ Each run creates two fresh orders, A and B, for seeded user 1. It connects two c
 **Verdict: SSE for order-status notifications in production.** The feature only goes server → client, missed events must be recoverable, and it sits behind ordinary HTTP infrastructure. This SSE endpoint already replays from the database with `Last-Event-ID`, while the Socket.IO side replays nothing and also needs `Upgrade` support and sticky sessions (the 13 bytes it saves per event don't matter at this rate). Before shipping, SSE needs auth, through a session cookie, which `EventSource` sends on the same origin. A client on another origin has to create it with `withCredentials: true`, and the server has to answer with `Access-Control-Allow-Credentials: true` and a specific origin, not `*`. The choice would flip to WebSocket if the client had to send frequent messages on the same channel, such as a support chat or live bidding.
 
 **Two or more instances:** the bus is an in-process `Subject`, so an event is published only on the instance that handled the PATCH. SSE streams and Socket.IO rooms on the other instances never get it live. SSE clients catch up from the table only after a reconnect, and a healthy idle stream never reconnects on its own, so they can miss events for as long as the connection stays up. WebSocket clients don't catch up at all. On top of that, Socket.IO's long-polling handshake fails unless every request of a session reaches the same instance. The fix is to feed every instance's bus from a broker (Redis pub/sub, or Postgres `LISTEN/NOTIFY` on the `order_events` insert); for Socket.IO rooms, the Redis adapter does that job. Socket.IO also needs sticky sessions, or clients that connect over `transports: ['websocket']` only.
+
+## Async events via RabbitMQ
+
+HW#19. When `POST /orders` creates an order, the API publishes an `order.placed` event to RabbitMQ. A separate consumer process turns each event into one row in `invoices`. Delivery is at-least-once; the invoice is written once.
+
+### Topology
+
+```
+                     ┌───────────────────── policy shop.events: alternate-exchange = shop.ae
+                     │
+ API ──publish──▶ shop.events (topic) ──[order.placed]──▶ shop.invoicing (quorum) ──▶ consumer
+   order.placed      │                                       │
+                     │ no binding matches                    │ rejected, or past delivery-limit 5
+                     ▼                                       ▼   (policy shop.invoicing)
+                 shop.ae (fanout)                        shop.dlx (fanout)
+                     │                                       │
+                     ▼                                       ▼
+                 shop.unrouted (quorum)                  shop.dlq (quorum, no DLX of its own)
+```
+
+- **Names** live in [src/messaging/topology.ts](src/messaging/topology.ts). `npm run rabbitmq:bootstrap` applies the policies ([scripts/rabbitmq-policies.sh](scripts/rabbitmq-policies.sh), via `rabbitmqctl`) and declares everything. It's idempotent, and each demo runs it too.
+- **Policy on `shop.invoicing`:** `dead-letter-exchange: shop.dlx`, `delivery-limit: 5`, `dead-letter-strategy: at-least-once`, `overflow: reject-publish`.
+- **Policy on `shop.events`:** `alternate-exchange: shop.ae`.
+- **Policies, not queue arguments:** a changed `x-` argument on an existing queue fails with `406 PRECONDITION_FAILED`, while a policy can change on a running broker. Only `x-queue-type: quorum` is an argument, because a queue's type never changes.
+- **Quorum queues:** durable, replicated in a cluster, with a built-in delivery limit.
+
+### The event contract
+
+An example (ids vary per run):
+
+```json
+{
+  "eventId": "434",
+  "type": "order.placed",
+  "version": 1,
+  "occurredAt": "2026-11-07T19:58:11.402Z",
+  "data": {
+    "orderId": 330, "userId": 3, "totalCents": "189900",
+    "items": [{ "productId": 8, "quantity": 1, "unitPriceCents": "189900" }]
+  }
+}
+```
+
+- **`eventId`** is the `order_events.id` of the order's **creation row** (`null → paid`), written in the checkout transaction. It's stable: every publish of this order's event carries the same value, and it's what the consumer deduplicates on. It's a string, because Postgres returns bigint as one.
+- **`occurredAt`** is that row's `created_at`, not the publish time, so two publishes of one event have identical bodies.
+- **Money is integer cents in a decimal string** (`"189900"` = 1899.00): the columns are bigint, and a JSON number isn't exact past 2^53. Never a float. There's no currency field, because the shop has one currency.
+- **Fields are chosen one by one**, never an ORM entity spread, so new columns can't leak into the message.
+- **AMQP properties:** `messageId = eventId`, `type`, `contentType: application/json`, `persistent: true`, `timestamp` from `occurredAt`.
+- **Strict producer, tolerant reader** ([src/messaging/order-placed.ts](src/messaging/order-placed.ts)). The producer's schema rejects any unplanned field. The consumer's reader drops unknown fields, so adding an optional field to v1 doesn't send every message to the DLQ. An unknown `type` or `version`, or a missing or invalid field, is poison.
+
+### Publishing
+
+- **After the commit, never inside the transaction:** `OrdersService.create` publishes once `checkout()` has returned. Inside the retrying transaction callback, a rolled-back attempt would publish an order that doesn't exist. An Idempotency-Key replay doesn't publish again.
+- **Each message waits for its own broker confirm**, with a **2 s budget** that includes connecting. `POST /orders` waits up to 2 s when the broker is down or not answering. A failure is logged with `eventId` and `orderId`, and the order is still `201`.
+- **`mandatory: true`** plus a `'return'` listener catches a message nothing takes. With the AE in place, an unknown key lands in `shop.unrouted` instead.
+- **One connection and one confirm channel, opened lazily.** The API boots without a broker. A broken connection is dropped and reopened on the next publish.
+
+### The consumer
+
+`npm run consumer` (after `npm run build` and `npm run rabbitmq:bootstrap`) runs [src/consumer/main.ts](src/consumer/main.ts) as its own process, with its own DB pool and AMQP connection. For each `order.placed` it writes one row to `invoices`, with `INSERT … ON CONFLICT (event_id) DO NOTHING`, and then acks. A redelivered event inserts nothing and is acked as `skipped`.
+
+- **Prefetch 10 × under 1 s per message ≪ the 30-minute `consumer_timeout`.** Each delivery is one `INSERT` plus an ack. 10 also matches the consumer's DB pool of 10, so no handler waits for a connection.
+- **Poison goes to the DLQ at once** (`reject` without requeue): a body that isn't JSON, a payload that doesn't parse as `order.placed` v1, or a Postgres data or integrity error (class 22 or 23, e.g. an `orderId` that doesn't exist).
+- **Transient errors are requeued** (`reject` with requeue): the connection, a timeout, a serialization failure. They're bounded by `delivery-limit` 5, after which the message is dead-lettered with `x-first-death-reason=delivery_limit`.
+- **SIGTERM or Ctrl-C** stops it cleanly: no new deliveries, the ones in flight finish and are acked, then it closes. If it loses the broker it exits with code 1, and its unacked deliveries go back to the queue.
+- **Output:** stdout carries one JSON line per delivery and per outcome, which the demos count; logs go to stderr.
+- **`CONSUMER_CRASH_AFTER_EFFECT=1` is demo-only.** The consumer kills itself with SIGKILL after the invoice commits and before the ack. Only `demo:duplicate` sets it.
+
+### Why at-least-once, not exactly-once
+
+RabbitMQ can't promise exactly-once, because each hand-off can fail after the receiving side has already acted:
+- **an ack can be lost after the commit:** the invoice is written, the ack never reaches the broker, and the broker delivers the message again;
+- **a confirm can be lost after the broker stored the message:** the publisher can't tell "not stored" from "stored, answer lost", and the only safe retry may store it twice;
+- **a crash between the effect and the ack means redelivery:** the broker only knows the message wasn't acked.
+
+So a message can arrive more than once, and the effect has to tolerate that. Two things make the result one invoice:
+1. a **stable `eventId`** (the creation row, the same on every publish and redelivery);
+2. **`INSERT … ON CONFLICT (event_id) DO NOTHING`** on a unique `event_id`.
+
+Idempotency is a property of the operation: doing it twice leaves the same state as doing it once. An idempotency key is the tool that gives an operation that property, and here the key is `event_id`.
+
+**How the duplicate is produced:** `demo:duplicate` runs the consumer as a separate process. The consumer kills itself with SIGKILL after the invoice commits and before the ack, which is a real crash at the worst moment. A second consumer then gets the redelivery (`redelivered: true`) and skips it. `channel.close()` or a SIGTERM wouldn't prove anything: those are polite shutdowns, and they would finish and ack, or hand the message back through a different code path, rather than lose the ack the way a crash does.
+
+### Demo results
+
+One run of each, from this repository:
+
+```
+$ npm run demo:publish          # ~4 s, exit=0
+published=5
+delivered=5
+effect=5
+acked=5
+dlq=0
+prefetch=10
+
+$ npm run demo:dlq              # ~4 s, exit=0
+rejected=1
+work=0
+dlq=1
+dlq-reason=rejected
+effect=0
+
+$ npm run demo:duplicate        # ~2 s, exit=0
+deliveries=2
+effect=1
+skipped=1
+```
+
+Timings are approximate wall clock, including npm; they vary with the machine and a warm or cold Docker. About 1 s of each depth read is the stability window.
+
+### How the demos work
+
+**The reset.** Each demo first runs the bootstrap (the grader never runs it separately), then purges `shop.invoicing`, `shop.dlq` and `shop.unrouted`. Database rows aren't deleted: the effect is counted from `invoices` for **this run's event ids only**, and every run's events are new.
+
+**The orders** go through `OrdersService.create` in a Nest application context with no HTTP server. The buyer is the seeded `user3@example.com`, whose balance each run resets. The product is the cheapest one with enough stock, 1 unit per order. The seed's stock lasts well over 100 runs, and `npm run seed` restores it.
+
+The three demos:
+- **`demo:publish`:** places 5 orders, so 5 events, confirmed by the broker. Then it starts the consumer, waits for 5 acks, stops it, and measures: the invoices from the DB, the queue depths from the broker. `prefetch` is the value the consumer reported after setting it.
+- **`demo:dlq`:** publishes one `order.placed` with `version: 2`, which the consumer doesn't know, and waits for the reject. Then it reads `x-first-death-reason` from the DLQ's head without removing it: `get`, read the headers, `nack` with requeue. Not `reject`: the DLQ has no policy, so it has quorum's default delivery limit of 20 and no DLX, and only `reject` counts toward that limit.
+- **`demo:duplicate`:** places 1 order and runs the crash described above. It also checks that the child really exited by SIGKILL.
+
+**Measuring depth.** Depths are read with `checkQueue` after the consumer has stopped, because it counts ready messages only and nothing may be unacked. They're polled until they hold for 1 s, since dead-lettering is asynchronous. There's a 60 s overall deadline, and leftover consumer processes are killed on any exit.
+
+### Checks beyond the contract
+
+Each demo also checks what would otherwise pass on wrong numbers. stderr shows every check as `ok` or `FAIL`.
+
+- **`demo:publish`:** `delivered = acked = 5`, and the work queue is empty.
+- **`demo:dlq`:** every reject was without requeue.
+- **`demo:duplicate`:** the first consumer died by SIGKILL, the invoice was committed before the crash, the redelivery had `redelivered: true`, and `skipped ≥ 1`.
+
+These were measured by breaking the code on purpose. In three of the five deliberate failures, the brief's invariants alone would have **passed**:
+
+| Broken on purpose | Output | Caught by |
+|---|---|---|
+| `noAck: true` | `deliveries=1 effect=1 skipped=0` | contract (`deliveries ≥ 2`) |
+| no `prefetch()` call | `prefetch=0` | contract (`1 ≤ prefetch ≤ 2000`) |
+| no `ON CONFLICT` | `deliveries=2 effect=1 skipped=0`; the duplicate was rejected with 23505 | only `skipped ≥ 1` |
+| poison requeued, consumer left running | 6 deliveries in milliseconds, then `dlq-reason=delivery_limit` | only "rejected without requeue" |
+| no purge, a stale message in the queue | `published=5 delivered=6 effect=5 acked=6 dlq=0` | only `delivered = acked = 5` |
+
+### Known gaps and limits
+
+- **No outbox.** `POST /orders` publishes after the commit and waits up to 2 s; if the broker is down, the order is `201` and the event is lost, which only a log line records (closed by HW#22's transactional outbox).
+- **The mark and the effect.** The consumer's dedup mark and its effect are the same `invoices` row, written in one statement, so they can't diverge. That stops being true as soon as the effect leaves this database (an email, another service), which is what HW#22's `processed_messages` generalises.
+- **No delayed retry.** Transient failures are requeued immediately, so the 5 attempts can be used up in milliseconds, and a DB outage of a few seconds dead-letters the message; the fix is a TTL wait queue or a delayed retry.
+- **`reject`, never `nack`.** On 4.3 quorum queues only `reject` with requeue counts toward `delivery-limit`, so the consumer never uses `nack`, which would loop forever. The DLQ peek is the one deliberate `nack`, as explained above.
+- **Dead-lettering is at-most-once by default.** The policy sets `dead-letter-strategy: at-least-once` plus `overflow: reject-publish`; without the second key, RabbitMQ silently falls back to at-most-once.
+- **Unroutable messages.** Without the AE, a message with a key nothing is bound to is confirmed and dropped; with it, it lands in `shop.unrouted`, which should stay empty.
+- **4.3.7, not the 4.2 LTS.** 4.3 is what the lecture measured, including the `reject`/`nack` difference and `consumer_timeout` on quorum queues, so the demos match it. In production I'd run 4.2 LTS (supported until 2030) unless a 4.3 feature were needed; the code uses `reject` only, so it's bounded on both.
+
+### Operating rules
+
+- **Run `npm run rabbitmq:bootstrap` before starting the consumer.** The consumer declares exchanges and queues, but AMQP can't set policies. Without them, `shop.invoicing` has no dead-letter exchange, only quorum's built-in delivery limit of 20, so a poison message is **dropped** after 20 attempts instead of being parked in `shop.dlq`. It's safe to re-run.
+- **`shop.unrouted` should stay empty.** A non-zero depth means a publisher sends a routing key nothing is bound to. Check it with `docker compose exec -T rabbitmq rabbitmqctl -q list_queues name messages`, or in the UI at http://localhost:21114.
 
 ## Database: schema, seed, indexes
 
