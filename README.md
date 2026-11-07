@@ -436,7 +436,7 @@ Idempotency is a property of the operation: doing it twice leaves the same state
 One run of each, from this repository:
 
 ```
-$ npm run demo:publish          # 4.1 s, exit=0
+$ npm run demo:publish          # ~4 s, exit=0
 published=5
 delivered=5
 effect=5
@@ -444,20 +444,20 @@ acked=5
 dlq=0
 prefetch=10
 
-$ npm run demo:dlq              # 3.9 s, exit=0
+$ npm run demo:dlq              # ~4 s, exit=0
 rejected=1
 work=0
 dlq=1
 dlq-reason=rejected
 effect=0
 
-$ npm run demo:duplicate        # 2.0 s, exit=0
+$ npm run demo:duplicate        # ~2 s, exit=0
 deliveries=2
 effect=1
 skipped=1
 ```
 
-Timings are wall clock including npm, across the verification runs: publish 4.1–4.5 s, dlq 3.8–3.9 s, duplicate 1.9–2.0 s. About 1 s of each depth read is the stability window.
+Timings are approximate wall clock, including npm; they vary with the machine and a warm or cold Docker. About 1 s of each depth read is the stability window.
 
 ### How the demos work
 
