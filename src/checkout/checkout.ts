@@ -1,9 +1,12 @@
+import { randomUUID } from 'node:crypto';
 import type { DataSource, EntityManager } from 'typeorm';
 import {
   inTransactionWithRetry,
   type RetryOptions,
 } from '../common/transaction-retry.js';
 import { JobEntity, type OrderEntity, UserEntity } from '../entities/index.js';
+import { toOrderPlacedEvent } from '../messaging/order-placed.js';
+import { OutboxRepository } from '../messaging/outbox.repository.js';
 import {
   type NewOrderItem,
   OrdersRepository,
@@ -113,6 +116,22 @@ export async function checkout(
       await manager.insert(JobEntity, {
         type: 'send-receipt',
         order: { id: order.id },
+      });
+
+      // The order.placed event, in the same transaction: one COMMIT for the order,
+      // its items, the stock, the balance and the event, so an event exists if and
+      // only if its order does. Built from the saved order (its id, total and prices
+      // as charged). Through this transaction's manager; the relay publishes it
+      // later, and nothing here talks to the broker, which can't roll back. A
+      // retried attempt rolls its row back and gets a new id; only the committed
+      // one exists.
+      const event = toOrderPlacedEvent(order, randomUUID());
+      await new OutboxRepository(manager).add({
+        id: event.eventId,
+        aggregateType: 'order',
+        aggregateId: order.id,
+        type: event.type,
+        payload: event,
       });
 
       return order;

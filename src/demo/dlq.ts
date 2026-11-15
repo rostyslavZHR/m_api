@@ -1,5 +1,5 @@
-// npm run demo:dlq — one poison message (order.placed version 2, which this
-// consumer doesn't know) → rejected without requeue → parked in the DLQ with
+// npm run demo:dlq — one poison message (an old order.placed version 1, which this
+// consumer no longer reads) → rejected without requeue → parked in the DLQ with
 // x-first-death-reason, no invoice written.
 //
 // rejected=… work=0 dlq=1 dlq-reason=rejected effect=0
@@ -54,14 +54,14 @@ await runDemo('demo:dlq', async (onCleanup) => {
     throw new Error('the consumer did not start (see its log above)');
   }
 
-  // A fresh id per run (no order_events row has one this large), so the effect
-  // check below counts only this message. Otherwise a valid v1 body: only the
-  // version makes it poison.
+  // A v1 message, as HW#19 published them: a digits eventId and version 1. The
+  // v2 reader rejects it. A fresh id per run (no order_events row has one this
+  // large), so the effect check below counts only this message.
   const eventId = String(Date.now());
   const poison = {
     eventId,
     type: 'order.placed',
-    version: 2,
+    version: 1,
     occurredAt: new Date().toISOString(),
     data: {
       orderId: 1,
@@ -85,7 +85,7 @@ await runDemo('demo:dlq', async (onCleanup) => {
       (error) => (error ? reject(error) : resolve()),
     ),
   );
-  log(`published poison eventId=${eventId} (version 2)`);
+  log(`published poison eventId=${eventId} (version 1)`);
 
   const handled = await consumer.waitFor(
     (lines) => linesOf(lines, 'rejected').some((line) => line.messageId === eventId),

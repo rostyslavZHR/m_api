@@ -61,17 +61,6 @@ describe('Orders API (e2e)', () => {
     expect((await db.admin.manager.findOneByOrFail(ProductEntity, { id: product.id })).stock).toBe(3);
   });
 
-  // The testkit's RABBITMQ_URL points at a closed port, so every publish fails.
-  it('still answers 201 when order.placed is not published, and counts the loss in /health', async () => {
-    const user = await aUser().insertVia(users);
-    const product = await aProduct().insertVia(products);
-    const before = (await api().get('/health').expect(200)).body.orderPlacedUnpublished;
-
-    await api().post('/orders').set('Idempotency-Key', randomUUID()).send(orderBody(user, product, 1)).expect(201);
-
-    expect((await api().get('/health').expect(200)).body.orderPlacedUnpublished).toBe(before + 1);
-  });
-
   it('replays the same order for a repeated Idempotency-Key, and writes it once', async () => {
     const user = await aUser().insertVia(users);
     const product = await aProduct().insertVia(products);

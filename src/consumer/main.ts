@@ -57,8 +57,9 @@ type Parsed =
   | { ok: true; event: OrderPlacedEvent }
   | { ok: false; reason: string };
 
-// The tolerant reader: unknown fields are dropped; a body that isn't JSON, an
-// unknown type or version, or a missing or invalid field is poison.
+// The tolerant reader (order.placed v2): unknown fields are dropped; a body that
+// isn't JSON, an unknown type or version (v1 included), or a missing or invalid
+// field is poison.
 function parse(content: Buffer): Parsed {
   let json: unknown;
   try {
@@ -71,7 +72,7 @@ function parse(content: Buffer): Parsed {
   const issues = result.error.issues
     .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
     .join('; ');
-  return { ok: false, reason: `not order.placed v1: ${issues}` };
+  return { ok: false, reason: `not order.placed v2: ${issues}` };
 }
 
 // Postgres error classes that fail the same way every time: 22 data exception,
