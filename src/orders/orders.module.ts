@@ -4,9 +4,11 @@ import { DbModule } from '../db/db.module.js';
 import { OrdersController } from './orders.controller.js';
 import { OrdersRepository } from './orders.repository.js';
 import { OrdersService } from './orders.service.js';
+import { OrderEventsModule } from '../order-events/order-events.module.js';
+import { MessagingModule } from '../messaging/messaging.module.js';
 
 @Module({
-  imports: [DbModule],
+  imports: [DbModule, OrderEventsModule, MessagingModule],
   controllers: [OrdersController],
   providers: [
     {
@@ -16,5 +18,7 @@ import { OrdersService } from './orders.service.js';
     },
     OrdersService,
   ],
+  // For the WebSocket gateway's ownership check.
+  exports: [OrdersService],
 })
 export class OrdersModule {}

@@ -23,3 +23,7 @@ export const RACE_PRODUCT = {
   priceCents: 1000, // 10.00
   stock: 10,
 };
+
+// The RabbitMQ demos' buyer (demo:publish, demo:duplicate) — a seeded user no other
+// demo touches. Each run resets it to USER_BALANCE_CENTS, so balance never runs out.
+export const MESSAGING_BUYER_EMAIL = 'user3@example.com';

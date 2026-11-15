@@ -167,6 +167,89 @@ paths:
               schema:
                 $ref: '#/components/schemas/Problem'
 
+  /orders/{id}/status:
+    patch:
+      operationId: updateOrderStatus
+      summary: Change an order's status
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateOrderStatus'
+      responses:
+        '200':
+          description: The order with its new status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '400':
+          description: The body is invalid (unknown status, extra fields)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: Order not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '409':
+          description: The transition isn't allowed from the current status, or the order changed concurrently
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /orders/{id}/events:
+    get:
+      operationId: streamOrderEvents
+      summary: Get order events by order ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The ID of the order
+          schema:
+            type: integer
+        - name: Last-Event-ID
+          in: header
+          required: false
+          description: The id of the last event the client received. The stream resends only events after it. Without it, the full history is sent first.
+          schema: 
+            type: integer
+            minimum: 0
+      responses:
+        '200':
+          description: >
+            An event stream. Each status change is an `order.status` event
+            whose id is the order_events id and whose data is a JSON
+            OrderStatusEvent. A `: ping` comment is sent every 15 s.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          description: The id or the Last-Event-ID header isn't a valid integer
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: Order not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
 components:
   schemas:
     Problem:
@@ -233,12 +316,7 @@ components:
         total_cents:
           type: integer
         status:
-          type: string
-          enum:
-            - new
-            - paid
-            - shipped
-            - cancelled
+          $ref: '#/components/schemas/OrderStatus'
         created_at:
           type: string
           format: date-time
@@ -278,3 +356,17 @@ components:
       required:
         - items
         - next_cursor
+    # The one copy of the status list in the spec. It must match ORDER_STATUSES in
+    # src/entities/order.entity.ts, which also drives the database CHECK constraint.
+    OrderStatus:
+      type: string
+      enum: [paid, processing, shipped, out_for_delivery, delivered, cancelled]
+
+    UpdateOrderStatus:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+      required:
+        - status

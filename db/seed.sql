@@ -38,7 +38,7 @@ FROM products; -- 2.5
 
 -- C3 · orders
 -- user_id is random: 1 + i % 1000 would tie each user to one status,
--- since 1000 is a multiple of 20 (every order of user 20 would be 'new').
+-- since 1000 is a multiple of 20 (every order of user 20 would be 'paid').
 -- created_at is spread over the last year for q1's date-range filter.
 -- total_cents is 0 here; C5 computes it from the lines.
 -- 'cancelled' is allowed by the schema's CHECK but deliberately not seeded.
@@ -46,9 +46,9 @@ INSERT INTO orders (user_id, status, total_cents, created_at)
 SELECT
     1 + floor(random() * 1000)::int,
     CASE
-        WHEN i % 20 = 0 THEN 'new' -- 5% ← partial index target
-        WHEN i % 4 = 0 THEN 'shipped' -- 20% (every 4th, minus the 5% already 'new')
-        ELSE 'paid' -- 75%
+        WHEN i % 20 = 0 THEN 'paid' -- 5% ← partial index target
+        WHEN i % 4 = 0 THEN 'shipped' -- 20% (every 4th, minus the 5% already 'paid')
+        ELSE 'delivered' -- 75%
     END,
     0,
     now() - random() * interval '365 days'
