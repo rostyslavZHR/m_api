@@ -5,6 +5,7 @@ import { RuntimeReadOnlySchemaHistory1791300000000 } from './1791300000000-Runti
 import { OrderStatusWorkflow1792871014418 } from './1792871014418-OrderStatusWorkflow.js';
 import { InitOrderEvent1792871091434 } from './1792871091434-InitOrderEvent.js';
 import { BackfillOrderEvents1792962470574 } from './1792962470574-BackfillOrderEvents.js';
+import { AddInvoices1794074431947 } from './1794074431947-AddInvoices.js';
 
 // A list, not a glob: TypeORM loads a glob through a dynamic import that Jest's
 // ESM mode can't follow. Add each new migration here; testkit.spec.ts fails if
@@ -17,4 +18,5 @@ export const migrations = [
   OrderStatusWorkflow1792871014418,
   InitOrderEvent1792871091434,
   BackfillOrderEvents1792962470574,
+  AddInvoices1794074431947,
 ];

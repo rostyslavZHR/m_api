@@ -13,7 +13,11 @@ import {
   InsufficientFundsError,
   OutOfStockError,
 } from '../checkout/checkout.errors.js';
-import type { OrderEntity, OrderStatus } from '../entities/index.js';
+import type {
+  OrderEntity,
+  OrderEventEntity,
+  OrderStatus,
+} from '../entities/index.js';
 import { OrdersRepository } from './orders.repository.js';
 import { ORDER_TRANSITIONS } from '../entities/order.entity.js';
 import { OrderEventsBus } from '../order-events/order-events.bus.js';
@@ -22,6 +26,9 @@ import {
   toStatusEvent,
 } from '../order-events/order-status-event.js';
 import { Observable } from 'rxjs';
+import { toOrderPlacedEvent } from '../messaging/order-placed.js';
+import { OrderPlacedFailures } from '../messaging/order-placed-failures.js';
+import { OrderPlacedPublisher } from '../messaging/order-placed.publisher.js';
 
 // The OrderItem, Order and CreateOrder schemas in openapi/openapi.yaml.
 interface OrderItem {
@@ -95,6 +102,8 @@ export class OrdersService {
     private readonly dataSource: DataSource,
     private readonly orders: OrdersRepository,
     private readonly ordersEventBus: OrderEventsBus,
+    private readonly orderPlacedPublisher: OrderPlacedPublisher,
+    private readonly orderPlacedFailures: OrderPlacedFailures,
   ) {}
 
   async getById(id: number): Promise<Order> {
@@ -159,7 +168,42 @@ export class OrdersService {
     // Read back, so the response is what the database holds.
     const order = await this.getById(Number(created.id));
     this.idempotencyKeys.set(idempotencyKey, { body, order });
+
+    // Here, not inside checkout(): its transaction has committed, and the retry
+    // wrapper can't run it again. A rolled-back attempt never gets this far, and an
+    // Idempotency-Key replay returned above without publishing.
+    await this.announceOrderPlaced(created.id);
     return order;
+  }
+
+  // Best effort: the order is committed whatever happens here, so nothing in this
+  // method fails the request. Every way the event can go unpublished is counted
+  // (GET /health shows the total) and logged with the order's id; the event itself
+  // is lost, the documented gap until the outbox (HW#22).
+  private async announceOrderPlaced(orderId: string): Promise<void> {
+    let creation: OrderEventEntity | null;
+    try {
+      creation = await this.orders.findCreationEvent(orderId);
+    } catch (error) {
+      return this.notPublished(
+        orderId,
+        `reading it failed: ${(error as Error).message}`,
+      );
+    }
+    if (!creation) return this.notPublished(orderId, 'no creation event');
+
+    const published = await this.orderPlacedPublisher.publish(
+      toOrderPlacedEvent(creation),
+    );
+    // The publisher has already logged why, with the eventId.
+    if (!published) this.notPublished(orderId, 'the publish failed');
+  }
+
+  private notPublished(orderId: string, reason: string): void {
+    const total = this.orderPlacedFailures.record();
+    this.logger.error(
+      `order.placed not published: orderId=${orderId}: ${reason} (unpublished since start: ${total})`,
+    );
   }
 
   async updateStatus({ id, to }: UpdateStatus): Promise<Order> {
