@@ -401,7 +401,7 @@ An example (ids vary per run):
 ### Publishing
 
 - **After the commit, never inside the transaction:** `OrdersService.create` publishes once `checkout()` has returned. Inside the retrying transaction callback, a rolled-back attempt would publish an order that doesn't exist. An Idempotency-Key replay doesn't publish again.
-- **Each message waits for its own broker confirm**, with a **2 s budget** that includes connecting. `POST /orders` waits up to 2 s when the broker is down or not answering. A failure is logged with `eventId` and `orderId`, and the order is still `201`.
+- **Each message waits for its own broker confirm**, with a **2 s budget** that includes connecting. `POST /orders` waits up to 2 s when the broker is down or not answering. A failure is logged with `eventId` and `orderId`, the order is still `201`, and the loss is **counted**: `GET /health` returns `orderPlacedUnpublished`, the number of events this process failed to publish since it started (the log has each one's ids).
 - **`mandatory: true`** plus a `'return'` listener catches a message nothing takes. With the AE in place, an unknown key lands in `shop.unrouted` instead.
 - **One connection and one confirm channel, opened lazily.** The API boots without a broker. A broken connection is dropped and reopened on the next publish.
 
@@ -411,8 +411,9 @@ An example (ids vary per run):
 
 - **Prefetch 10 × under 1 s per message ≪ the 30-minute `consumer_timeout`.** Each delivery is one `INSERT` plus an ack. 10 also matches the consumer's DB pool of 10, so no handler waits for a connection.
 - **Poison goes to the DLQ at once** (`reject` without requeue): a body that isn't JSON, a payload that doesn't parse as `order.placed` v1, or a Postgres data or integrity error (class 22 or 23, e.g. an `orderId` that doesn't exist).
-- **Transient errors are requeued** (`reject` with requeue): the connection, a timeout, a serialization failure. They're bounded by `delivery-limit` 5, after which the message is dead-lettered with `x-first-death-reason=delivery_limit`.
-- **SIGTERM or Ctrl-C** stops it cleanly: no new deliveries, the ones in flight finish and are acked, then it closes. If it loses the broker it exits with code 1, and its unacked deliveries go back to the queue.
+- **Transient errors are retried after a pause** (the connection, a timeout, a serialization failure). The consumer waits 1, 2, 4, 8, 16, then 30 s (doubling with `x-delivery-count`), then `reject`s with requeue. The 6 deliveries `delivery-limit` 5 allows therefore span about a minute, enough for a DB restart, before the message is dead-lettered with `x-first-death-reason=delivery_limit`. A waiting message stays unacked and holds one prefetch slot.
+- **It reconnects by itself.** If the broker goes away (a restart, a closed channel, a cancelled consumer), the unacked deliveries go back to the queue, and the consumer reconnects with backoff (1 s doubling to 30 s) and declares the topology again. That also applies at startup, so it can be started before the broker. A redelivered message is harmless: the INSERT is idempotent. The DB is different: if it's unreachable at startup, the consumer exits with code 1.
+- **SIGTERM or Ctrl-C** stops it cleanly: no new deliveries, retry and reconnect pauses end at once, the deliveries in flight finish and are acked, then it closes.
 - **Output:** stdout carries one JSON line per delivery and per outcome, which the demos count; logs go to stderr.
 - **`CONSUMER_CRASH_AFTER_EFFECT=1` is demo-only.** The consumer kills itself with SIGKILL after the invoice commits and before the ack. Only `demo:duplicate` sets it.
 
@@ -492,9 +493,9 @@ These were measured by breaking the code on purpose. In three of the five delibe
 
 ### Known gaps and limits
 
-- **No outbox.** `POST /orders` publishes after the commit and waits up to 2 s; if the broker is down, the order is `201` and the event is lost, which only a log line records (closed by HW#22's transactional outbox).
+- **No outbox.** `POST /orders` publishes after the commit and waits up to 2 s; if the broker is down, the order is `201` and the event is lost; the log line and the `/health` counter (`orderPlacedUnpublished`, per process, reset on restart) make the loss visible but don't recover it (closed by HW#22's transactional outbox).
 - **The mark and the effect.** The consumer's dedup mark and its effect are the same `invoices` row, written in one statement, so they can't diverge. That stops being true as soon as the effect leaves this database (an email, another service), which is what HW#22's `processed_messages` generalises.
-- **No delayed retry.** Transient failures are requeued immediately, so the 5 attempts can be used up in milliseconds, and a DB outage of a few seconds dead-letters the message; the fix is a TTL wait queue or a delayed retry.
+- **The retry delay lives in the consumer, not the broker.** A message waiting to be retried holds a prefetch slot, a DB outage longer than about a minute still dead-letters it, and a consumer restart starts the wait over; a broker-side delay (a TTL wait queue that dead-letters back into the work queue) would free the slot and survive restarts.
 - **`reject`, never `nack`.** On 4.3 quorum queues only `reject` with requeue counts toward `delivery-limit`, so the consumer never uses `nack`, which would loop forever. The DLQ peek is the one deliberate `nack`, as explained above.
 - **Dead-lettering is at-most-once by default.** The policy sets `dead-letter-strategy: at-least-once` plus `overflow: reject-publish`; without the second key, RabbitMQ silently falls back to at-most-once.
 - **Unroutable messages.** Without the AE, a message with a key nothing is bound to is confirmed and dropped; with it, it lands in `shop.unrouted`, which should stay empty.
@@ -879,7 +880,7 @@ The multi-stage [Dockerfile](Dockerfile) only copies `dist/`, `package*.json`, `
 | `src/common/` | shared `problem+json` builder and the global exception filter |
 | `src/config/env.schema.ts` | zod schema for all env vars, fail-fast `validate()` |
 | `src/db/` | `DbModule`/`DbService`/`DbController` — the app's DataSource (`app-data-source.ts`), `/db` health query |
-| `src/health-check/` | dependency-free `/health` module (`{ uptimeSec }`) |
+| `src/health-check/` | `/health` module (`{ uptimeSec, orderPlacedUnpublished }`) |
 | `src/order-events/` | `OrderEventsBus` (the in-process Subject for committed status changes) and the `OrderStatusEvent` payload both transports send, see [Real-time order status](#real-time-order-status-hw18) |
 | `src/realtime/` | `OrdersGateway`: the Socket.IO `/orders` namespace, handshake identity, `join` with the ownership check, bus → rooms |
 | `src/entities/` | TypeORM entities for the HW#12 schema; `index.ts` exports them and the list the DataSource registers |
