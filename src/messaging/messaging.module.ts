@@ -1,12 +1,20 @@
 import { Module } from '@nestjs/common';
-import { OrderPlacedFailures } from './order-placed-failures.js';
+import { ConfigService } from '@nestjs/config';
+import type { Env } from '../config/env.schema.js';
 import { OrderPlacedPublisher } from './order-placed.publisher.js';
 
-// RabbitMQ on the API side: the publisher and its failure count. Topology and
-// policies come from the bootstrap; the consumer is a separate process with its
-// own entrypoint.
+// The publisher as a Nest provider, for the demos' application context. The relay
+// (src/relay/main.ts) is a plain process and constructs it directly; the API's
+// order path no longer publishes (it writes to the outbox).
 @Module({
-  providers: [OrderPlacedPublisher, OrderPlacedFailures],
-  exports: [OrderPlacedPublisher, OrderPlacedFailures],
+  providers: [
+    {
+      provide: OrderPlacedPublisher,
+      useFactory: (config: ConfigService<Env, true>) =>
+        new OrderPlacedPublisher(config.get('RABBITMQ_URL', { infer: true })),
+      inject: [ConfigService],
+    },
+  ],
+  exports: [OrderPlacedPublisher],
 })
 export class MessagingModule {}

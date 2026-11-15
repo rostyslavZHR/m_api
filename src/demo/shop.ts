@@ -11,8 +11,11 @@ import { NestFactory } from '@nestjs/core';
 import { DataSource, MoreThanOrEqual, Not } from 'typeorm';
 import { validate } from '../config/env.schema.js';
 import { ProductEntity, UserEntity } from '../entities/index.js';
-import type { OrderPlacedEvent } from '../messaging/order-placed.js';
-import { OrderPlacedPublisher } from '../messaging/order-placed.publisher.js';
+import { MessagingModule } from '../messaging/messaging.module.js';
+import {
+  type OutboxMessage,
+  OrderPlacedPublisher,
+} from '../messaging/order-placed.publisher.js';
 import { OrdersModule } from '../orders/orders.module.js';
 import { OrdersService } from '../orders/orders.service.js';
 import {
@@ -22,8 +25,16 @@ import {
 } from '../seed-fixtures.js';
 import { SetupError, log } from './lib.js';
 
+// MessagingModule for the publisher the demos observe. Since HW#22 Phase B the order
+// path writes to the outbox and doesn't publish; until the relay (Phase C) publishes
+// those rows, placeOrders finds 0 events and demo:publish / demo:duplicate stop
+// with a setup error.
 @Module({
-  imports: [ConfigModule.forRoot({ isGlobal: true, validate }), OrdersModule],
+  imports: [
+    ConfigModule.forRoot({ isGlobal: true, validate }),
+    OrdersModule,
+    MessagingModule,
+  ],
 })
 class DemoShopModule {}
 
@@ -51,9 +62,9 @@ export async function openShop(): Promise<Shop> {
   const publisher = app.get(OrderPlacedPublisher);
   const publish = publisher.publish.bind(publisher);
   const sent: { eventId: string; ok: boolean }[] = [];
-  publisher.publish = async (event: OrderPlacedEvent) => {
-    const ok = await publish(event);
-    sent.push({ eventId: event.eventId, ok });
+  publisher.publish = async (message: OutboxMessage) => {
+    const ok = await publish(message);
+    sent.push({ eventId: message.id, ok });
     return ok;
   };
 

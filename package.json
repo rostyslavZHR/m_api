@@ -23,6 +23,7 @@
     "rabbitmq:smoke": "bash scripts/with-secrets.sh dev node scripts/rabbitmq-smoke.mjs",
     "rabbitmq:bootstrap": "bash scripts/with-secrets.sh dev node dist/rabbitmq-bootstrap.js",
     "consumer": "bash scripts/with-secrets.sh dev node --env-file-if-exists=.env dist/consumer/main.js",
+    "relay": "bash scripts/with-secrets.sh dev node --env-file-if-exists=.env dist/relay/main.js",
     "demo:publish": "bash scripts/with-secrets.sh dev node --env-file-if-exists=.env dist/demo/publish.js",
     "demo:dlq": "bash scripts/with-secrets.sh dev node --env-file-if-exists=.env dist/demo/dlq.js",
     "demo:duplicate": "bash scripts/with-secrets.sh dev node --env-file-if-exists=.env dist/demo/duplicate.js",
