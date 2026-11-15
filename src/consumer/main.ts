@@ -114,9 +114,10 @@ async function handle(
   const parsed = parse(message.content);
   if (!parsed.ok) return reject(false, parsed.reason);
 
-  let outcome: Awaited<ReturnType<typeof insertInvoice>>;
+  let result: Awaited<ReturnType<typeof insertInvoice>>;
   try {
-    outcome = await insertInvoice(dataSource, parsed.event);
+    // One transaction: the processed_messages row and the invoice commit together.
+    result = await insertInvoice(dataSource, parsed.event);
   } catch (error) {
     const code = (error as { code?: unknown }).code;
     const reason = `${typeof code === 'string' ? code : 'no code'}: ${errorText(error)}`;
@@ -138,8 +139,14 @@ async function handle(
     process.kill(process.pid, 'SIGKILL');
   }
 
+  // After the commit: an ack before it, then a crash, would lose the effect for good.
   channel.ack(message);
-  report({ event: outcome, messageId: parsed.event.eventId });
+  if (result.outcome === 'applied') {
+    report({ event: 'applied', messageId: parsed.event.eventId });
+  } else {
+    report({ event: 'skipped', messageId: parsed.event.eventId, reason: result.reason });
+    log(`skipped messageId=${parsed.event.eventId}: ${result.reason}`);
+  }
 }
 
 interface Session {

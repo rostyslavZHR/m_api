@@ -10,23 +10,21 @@ import {
 } from 'typeorm';
 import { OrderEntity } from './order.entity.js';
 
-// The invoicing consumer's effect: one row per order.placed event. Written only by
-// the consumer, with INSERT … ON CONFLICT (event_id) DO NOTHING, so a redelivered
-// event inserts nothing (src/consumer/invoices.ts).
+// The invoicing consumer's effect: one invoice per order. Written only by the
+// consumer, in the same transaction as its processed_messages row
+// (src/consumer/invoices.ts).
 @Entity('invoices')
-// At most one invoice per event, enforced by the database. ON CONFLICT (event_id)
-// relies on this constraint; it's named so error messages are readable.
-@Unique('invoices_event_id_key', ['eventId'])
+// One invoice per order: the natural key, enforced by the database. Level 1 of the
+// consumer's idempotency: it protects the effect even when the processed_messages
+// row is gone (cleaned up) or a different event arrives for the same order.
+// INSERT … ON CONFLICT (order_id) DO NOTHING relies on it; named so errors are readable.
+@Unique('invoices_order_id_key', ['orderId'])
 export class InvoiceEntity {
   @PrimaryGeneratedColumn('identity', {
     type: 'bigint',
     generatedIdentity: 'ALWAYS',
   })
   id: string;
-
-  // The event's id (the order's creation row in order_events): the dedup key.
-  @Column('bigint', { name: 'event_id' })
-  eventId: string;
 
   // order_id declared twice, as in OrderEventEntity: the column for the raw id,
   // the relation for the FK. An event for an order that doesn't exist fails with

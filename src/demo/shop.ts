@@ -114,14 +114,18 @@ export async function openShop(): Promise<Shop> {
   return { dataSource, placeOrders, close: () => app.close() };
 }
 
-// The effect, from the database, for this run's events only: earlier runs'
-// invoices stay in the table and don't count.
+// The effect, from the database, for this run's events only: the invoices of the
+// orders these events are about (invoices have no event id since HW#22: one
+// invoice per order). Compared as text, so a non-uuid id (demo:dlq's v1 poison)
+// just matches nothing.
 export async function countInvoices(
   dataSource: DataSource,
   eventIds: string[],
 ): Promise<number> {
   const [{ count }] = await dataSource.query<{ count: string }[]>(
-    'SELECT count(*) FROM invoices WHERE event_id = ANY($1::bigint[])',
+    `SELECT count(*) FROM invoices i
+     JOIN outbox o ON o.aggregate_id = i.order_id::text
+     WHERE o.id::text = ANY($1)`,
     [eventIds],
   );
   return Number(count);

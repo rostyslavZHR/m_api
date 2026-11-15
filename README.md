@@ -413,7 +413,7 @@ An example (ids vary per run):
 
 ### The consumer
 
-`npm run consumer` (after `npm run build` and `npm run rabbitmq:bootstrap`) runs [src/consumer/main.ts](src/consumer/main.ts) as its own process, with its own DB pool and AMQP connection. For each `order.placed` it writes one row to `invoices`, with `INSERT … ON CONFLICT (event_id) DO NOTHING`, and then acks. A redelivered event inserts nothing and is acked as `skipped`.
+`npm run consumer` (after `npm run build` and `npm run rabbitmq:bootstrap`) runs [src/consumer/main.ts](src/consumer/main.ts) as its own process, with its own DB pool and AMQP connection. For each `order.placed` it writes one row to `invoices` and then acks; a redelivered event inserts nothing and is acked as `skipped`. (HW#19 deduplicated with `ON CONFLICT (event_id)`; since HW#22 it uses `processed_messages` plus a unique `order_id`, see [The idempotent consumer](#the-idempotent-consumer).)
 
 - **Prefetch 10 × under 1 s per message ≪ the 30-minute `consumer_timeout`.** Each delivery is one `INSERT` plus an ack. 10 also matches the consumer's DB pool of 10, so no handler waits for a connection.
 - **Poison goes to the DLQ at once** (`reject` without requeue): a body that isn't JSON, a payload that doesn't parse as `order.placed` v1, or a Postgres data or integrity error (class 22 or 23, e.g. an `orderId` that doesn't exist).
@@ -432,9 +432,9 @@ RabbitMQ can't promise exactly-once, because each hand-off can fail after the re
 
 So a message can arrive more than once, and the effect has to tolerate that. Two things make the result one invoice:
 1. a **stable `eventId`** (the creation row, the same on every publish and redelivery);
-2. **`INSERT … ON CONFLICT (event_id) DO NOTHING`** on a unique `event_id`.
+2. **`INSERT … ON CONFLICT (event_id) DO NOTHING`** on a unique `event_id` (HW#19; replaced in HW#22 by two levels, see [The idempotent consumer](#the-idempotent-consumer)).
 
-Idempotency is a property of the operation: doing it twice leaves the same state as doing it once. An idempotency key is the tool that gives an operation that property, and here the key is `event_id`.
+Idempotency is a property of the operation: doing it twice leaves the same state as doing it once. An idempotency key is the tool that gives an operation that property, and here the key is `event_id` (since HW#22, the outbox uuid in `processed_messages`).
 
 **How the duplicate is produced:** `demo:duplicate` runs the consumer as a separate process. The consumer kills itself with SIGKILL after the invoice commits and before the ack, which is a real crash at the worst moment. A second consumer then gets the redelivery (`redelivered: true`) and skips it. `channel.close()` or a SIGTERM wouldn't prove anything: those are polite shutdowns, and they would finish and ack, or hand the message back through a different code path, rather than lose the ack the way a crash does.
 
@@ -595,6 +595,37 @@ Before taking any locks, the relay checks that the broker is reachable. During a
 | Two relays, 200 rows | each relay 100 rows (2 batches of 50); the queue +200, 0 duplicate ids |
 | Broker stopped, 3 orders | the rows stay waiting with `attempts` 0; waits of 0.3 → 0.9 → 1.1 → 3.6 → 4.4 → 8.6 → 24.8 s; drained by the first attempt after the broker came back (~23 s later, the backoff) |
 | No `SKIP LOCKED`, two relays, 100 rows | the queue +200: 100 duplicates |
+
+### The idempotent consumer
+
+The relay is at-least-once, so the consumer gets duplicates: a re-publish after a relay crash, a redelivery after a consumer crash, a replayed row. Every event must still produce **at most one invoice**. [src/consumer/invoices.ts](src/consumer/invoices.ts) handles each message in **one transaction**, with two levels of protection:
+
+1. **The inbox (`processed_messages`):** `INSERT (eventId, 'invoicing') … ON CONFLICT (message_id, consumer) DO NOTHING RETURNING`. If no row comes back, this consumer already processed this event: commit, ack, and log it as `skipped` (`duplicate`).
+2. **The natural key (`invoices.order_id`, unique):** `INSERT INTO invoices … ON CONFLICT (order_id) DO NOTHING`. A *different* event for an order that already has an invoice is recorded as processed and skipped (`order already invoiced`).
+
+Then **commit, then ack**. Acking before the commit would lose the effect for good if the process died in between.
+
+- **Why both levels:** the natural key protects the effect even after old inbox rows are cleaned up, or when another event arrives for the same order. The inbox gives exact "skipped" counts, and it works for effects that have no natural key.
+- **The rules behind it:**
+  - **One transaction for the mark and the effect.** Two transactions would be a dual write again: a crash between them leaves "processed, no invoice", lost for good, because the redelivery is skipped. This was measured.
+  - **The unique constraints are the check, never "SELECT, then insert".** Two concurrent copies would both see "not there yet" and both insert.
+  - **`ON CONFLICT` always names its target** (`(order_id)`, `(message_id, consumer)`), so any *other* unique violation still raises an error instead of being swallowed.
+- **The error policy (unchanged from HW#19):** an invalid message (not JSON, not v2, a data or integrity error) is rejected without requeue and goes to the DLQ. A database outage is rejected **with** requeue after a growing pause, bounded by `delivery-limit` 5, so RabbitMQ redelivers it. The consumer uses `reject`, never `nack`: on quorum queues only `reject` counts toward the limit.
+- **Counting:** the consumer prints `applied` and `skipped` lines on stdout, and `skipped` carries the reason.
+
+**Measured** (consumer and relay running):
+
+| Check | Result |
+|---|---|
+| Replaying every outbox row (327) | 327 applied, 4 skipped (`duplicate`: 4 messages that were already in the queue); invoices +327, processed +327 |
+| One new order | 1 invoice and 1 `processed_messages` row |
+| Replaying its event (`UPDATE outbox SET published_at = NULL …`) | `skipped: duplicate`; counts unchanged |
+| Two consumers, 50 replayed events | skipped 27 + 23 = 50; no new rows |
+| Mark and invoice in two transactions, crash between (deliberate) | `processed=1, invoices=0`, and the redelivery was skipped: lost |
+| Throw after the invoice insert, inside the transaction | 0 invoices, 0 processed; redelivered with growing pauses; applied once after the fix |
+| The same event twice at once | 1 applied, 1 `skipped: duplicate`; 1 invoice, 1 processed row |
+
+**The invoices migration** ([1794780921326-InvoicesPerOrder](src/migrations/1794780921326-InvoicesPerOrder.ts)) drops `event_id` and its unique constraint, and adds `invoices_order_id_key UNIQUE (order_id)`. It fails if an order already has two invoices, so check first with `SELECT order_id, count(*) FROM invoices GROUP BY order_id HAVING count(*) > 1`.
 
 ## Database: schema, seed, indexes
 
