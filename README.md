@@ -151,7 +151,7 @@ The [trade-offs](#trade-offs-websocket-vs-sse) and the [known gaps](#real-time-k
 
 ### HW#19: RabbitMQ order.placed
 
-> **Superseded in HW#22.** Since the outbox, `POST /orders` no longer publishes; a separate relay process does. `demo:publish` and `demo:duplicate` watched the publisher inside their own process, so they now stop with `setup failed: … 0 events built` (exit 2). They're **replaced by `demo:outbox` and `demo:crash-relay`** (HW#22); `demo:dlq` still runs as described. The block below is HW#19 as graded.
+> **Superseded in HW#22.** Since the outbox, `POST /orders` no longer publishes; a separate relay process does. `demo:publish` and `demo:duplicate` watched the publisher inside their own process, so they stopped working, and they're **removed**: `demo:outbox` and `demo:crash-relay` replace them (see [The demos](#the-demos)). `demo:dlq` still runs as described. The block below is HW#19 as graded, for the record.
 
 Self-contained: from a fresh clone, in the repository root (where `package.json` is). The API doesn't need to be running: each demo places its orders through the app's own `OrdersService` and starts the consumer itself. `npm run build` is required (the demos run from `dist/`), and so is `npm run migrate` (it creates the `invoices` table).
 
@@ -440,7 +440,7 @@ Idempotency is a property of the operation: doing it twice leaves the same state
 
 ### Demo results
 
-> HW#19's results, before the outbox. `demo:publish` and `demo:duplicate` are replaced in HW#22 (see above).
+> HW#19's results, before the outbox. `demo:publish` and `demo:duplicate` were removed in HW#22 (see above); the record below is how they ran then.
 
 One run of each, from this repository:
 
@@ -626,6 +626,93 @@ Then **commit, then ack**. Acking before the commit would lose the effect for go
 | The same event twice at once | 1 applied, 1 `skipped: duplicate`; 1 invoice, 1 processed row |
 
 **The invoices migration** ([1794780921326-InvoicesPerOrder](src/migrations/1794780921326-InvoicesPerOrder.ts)) drops `event_id` and its unique constraint, and adds `invoices_order_id_key UNIQUE (order_id)`. It fails if an order already has two invoices, so check first with `SELECT order_id, count(*) FROM invoices GROUP BY order_id HAVING count(*) > 1`.
+
+### Idempotency-Key at the API edge (level 3)
+
+A client that gets no answer to `POST /orders` (a timeout, a dropped connection) retries it, and without protection a retry is a second order and a second charge. `Idempotency-Key` (required, a uuid, as since HW#9) makes the retry safe. It's level 3 of the three idempotency levels, at the front door; levels 1 and 2 are the consumer's (above).
+
+**The `idempotency_keys` table:** primary key `(user_id, key)`, `fingerprint`, `order_id`, `created_at`. It replaces the in-memory `Map` in `OrdersService`, which a restart or a second instance didn't see.
+
+**How it works:** [`checkoutWithKey()`](src/checkout/checkout.ts) runs inside checkout's one transaction:
+1. **First statement:** `INSERT INTO idempotency_keys … ON CONFLICT (user_id, key) DO NOTHING RETURNING`.
+2. **A row comes back:** this request owns the key. It creates the order, then stores the order's id on the key row. The key, the order, its outbox row and everything else commit **together**.
+3. **No row comes back:** the key was already used, so nothing is created. The stored order is returned with `201` and an `Idempotent-Replayed: true` header.
+
+**Concurrency comes for free.** A second request with the same key waits on the first one's index entry until it commits (then it's a replay), or until it rolls back (then it takes the key over). There's no "in progress" state, because it's all one transaction.
+
+- **The same key with a different body → `422`.** The fingerprint is a sha256 of the canonical body, with fixed field order and items sorted. It only detects misuse; it's never the key. Using the body's hash as the key would merge two identical orders placed on purpose (measured: two keys, one order).
+- **Keys are per user:** the same key from two users is two keys, two orders. User B can't receive user A's order. Here the user is the body's `user_id`, since the API has no auth, so the scoping is only as strong as that field; in a real app the user comes from the auth token, never from the body.
+- **Deleting an order deletes its key** (`ON DELETE CASCADE`), so a retry after that would create a new order. That's a deliberate choice: orders are never deleted in practice, and a key pointing at nothing would be useless.
+- **What a replay returns:** the same order, with `201`. Its `status` is the order's current one: the response is read again, not stored.
+- **A failed checkout** (out of stock, insufficient funds) rolls the key back with everything else. Only a created order is remembered, and a retry with the same key tries again.
+- **Cleanup:** keys expire after 24 h. `npm run idempotency:cleanup` deletes the older ones, meant to run periodically (cron, like `backup.cron`). A retry after that creates a new order.
+
+**Measured** (the API, relay and consumer running): each case ends with **1 order, 1 outbox row, 1 invoice**:
+
+| Case | Result |
+|---|---|
+| The same key twice in a row | both `201`, the same order id; the second with `Idempotent-Replayed: true` |
+| The same key twice at the same moment | both `201`, the same order id, exactly one marked replayed |
+| A request, an API restart, the same request | the same order id, replayed (the old `Map` gave a second order here) |
+| The same key, a different body | `422`, no new order |
+| The same key, two users | two orders, one each |
+
+**And with the protection broken on purpose:**
+
+| Broken on purpose | Result |
+|---|---|
+| The old in-memory `Map`, restart between requests | 2 orders for one key |
+| The key checked outside the transaction (300 ms sleep), concurrent requests | 2 orders for one key (both passed the check); the key row points at one of them |
+| The body's hash as the key, two keys with the same body | 1 order where there should be 2 |
+
+### The demos
+
+Each demo starts from nothing but `docker compose up -d --wait`:
+- its npm script **builds first**, so no `dist/` is needed;
+- it applies **pending migrations** itself, as the schema owner;
+- it runs the **RabbitMQ bootstrap** (policies, exchanges, queues) and purges the queues.
+
+It then creates a **fresh user and product**, and every count is scoped to that user. The dev data, the seed, earlier runs and old outbox rows published meanwhile don't change the numbers, so each demo can be run any number of times. The relay and the consumer run as **child processes** (the real `dist/relay/main.js` and `dist/consumer/main.js`) and are killed at the end whatever happens. stdout carries only the `key=value` lines; logs go to stderr. Exit codes: `0` all checks held, `1` a check failed (lines still printed), `2` setup failed.
+
+```
+$ npm run demo:outbox          # ~7 s with the build, exit=0
+requests=2
+orders=1
+outbox=1
+published=1
+deliveries=1
+effect=1
+processed=1
+
+$ npm run demo:crash-write     # ~7 s, exit=0
+write-failed=1
+orders=0
+outbox=0
+published=0
+deliveries=0
+effect=0
+
+$ npm run demo:crash-relay     # ~5 s, exit=0
+published=1
+deliveries=2
+applied=1
+effect=1
+processed=1
+```
+
+- **`demo:outbox`: the whole chain, with a client retry.** The real API runs in the demo's process (on a random port) and gets two `POST /orders` with the same `Idempotency-Key`. That gives one order (the second request is answered with the same order and `Idempotent-Replayed: true`), one outbox row, published once, delivered once, one invoice and one `processed_messages` row.
+- **`demo:crash-write`: the order and its event commit together, or neither does.** Placing the order (the API's path, `checkoutWithKey`) fails **after** its outbox row was inserted, inside the transaction. With the relay and the consumer running for 3 s (six poll intervals), nothing comes out the other end.
+  - **The failure mechanism:** a temporary trigger on the transaction's last statement (`UPDATE idempotency_keys`, after the outbox insert). It's created with the schema owner's credentials (`app_user` can't create triggers), limited to the run's user by a `WHEN` clause, and dropped afterwards. There's no hook in the application code.
+  - **Why that statement:** the trigger isn't on the outbox insert itself, because failing that statement also fails an outbox insert that escaped the transaction, and the demo couldn't catch that trap.
+- **`demo:crash-relay`: at-least-once delivery, exactly one effect.** The relay dies **by SIGKILL after the broker confirmed the event and before it marked the row published**. A fresh relay publishes the same event again, and the consumer gets it twice, applies it once and skips it once (`duplicate`). **The kill mechanism:** a real `kill -9` at an exact point: the relay child runs with the demo-only `RELAY_CRASH_AFTER_CONFIRM=1`, and its `afterConfirms` hook SIGKILLs it there. The demo checks the exit signal, and that the row was still waiting after the crash.
+
+**Each demo catches its broken counterpart** (measured, each restored afterwards):
+
+| Broken on purpose | Demo | Result |
+|---|---|---|
+| A non-idempotent consumer (no inbox, no `ON CONFLICT`, the unique `order_id` dropped) | `demo:crash-relay` | `applied=2 effect=2 processed=0`, exit 1 |
+| The outbox insert outside the transaction (the DataSource's own manager) | `demo:crash-write` | `outbox=1 published=1 deliveries=1`: an event for an order that doesn't exist, exit 1 |
+| The relay marks (and commits) first, publishes after | `demo:crash-relay` | `deliveries=1`: the restarted relay sees the row as published and sends nothing, exit 1 |
 
 ## Database: schema, seed, indexes
 
@@ -889,7 +976,7 @@ CI uses environments (`record-deployment`, `--to-environment`) rather than the t
 
 ### Known gaps
 
-- **Idempotency-Key replays are kept in memory:** per process, lost on restart, and two simultaneous requests with the same key can both create an order. A table with a unique key on the idempotency key is the durable version.
+- **Idempotency-Key replays (closed in HW#22):** until HW#22 they were kept in memory, so they were lost on restart, and two simultaneous requests with the same key could both create an order. They're now the `idempotency_keys` table, claimed inside the checkout transaction; see [Idempotency-Key at the API edge](#idempotency-key-at-the-api-edge-level-3).
 - **`app-v1-password` lives in two places:** `init.sql` (the testkit reads it from there and hands it to the test app through `DB_PASSWORD_FILE`) and the Grading setup's `secrets/db_password` for running the app itself.
 - **The provider version is the commit SHA,** which only identifies the code on a clean tree: uncommitted changes get verified and published under `HEAD`'s SHA.
 - **No persistent broker is configured yet:** until `PACT_BROKER_URL`/`PACT_BROKER_TOKEN` secrets point at one (PactFlow, or a self-hosted broker), CI checks only this commit's consumer/provider pair, not the consumer against what is actually in production.

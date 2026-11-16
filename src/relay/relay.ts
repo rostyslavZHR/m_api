@@ -20,6 +20,9 @@ export interface RelayOptions {
   maxAttempts: number;
   // Sleep between polls when there's nothing (or less than a batch) to send.
   pollMs: number;
+  // Called after the batch's confirms arrived and before the rows are marked. Only
+  // demo:crash-relay sets it (to SIGKILL the relay at exactly that point).
+  afterConfirms?: () => void;
 }
 
 export const DEFAULTS: RelayOptions = {
@@ -58,7 +61,11 @@ interface Row {
 export async function relayBatch(
   dataSource: DataSource,
   publisher: Publisher,
-  { batchSize, maxAttempts }: Pick<RelayOptions, 'batchSize' | 'maxAttempts'>,
+  {
+    batchSize,
+    maxAttempts,
+    afterConfirms,
+  }: Pick<RelayOptions, 'batchSize' | 'maxAttempts' | 'afterConfirms'>,
 ): Promise<BatchResult> {
   return dataSource.transaction(async (manager) => {
     // The partial index's exact condition (published_at IS NULL) and order: an
@@ -89,6 +96,9 @@ export async function relayBatch(
           .catch(() => false),
       ),
     );
+    // The window demo:crash-relay hits: the broker has the messages, the rows
+    // aren't marked yet. A crash here means the next relay publishes them again.
+    afterConfirms?.();
     const published = rows.filter((_, i) => confirmed[i]).map((row) => row.id);
     const failed = rows.filter((_, i) => !confirmed[i]).map((row) => row.id);
 

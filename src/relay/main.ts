@@ -11,6 +11,11 @@ import { DEFAULTS, runRelay } from './relay.js';
 const log = (message: string) =>
   console.error(`[relay ${process.pid}] ${message}`);
 
+// DEMO ONLY (npm run demo:crash-relay): SIGKILL this process after a batch's confirms
+// and before its rows are marked published: a real crash at the worst moment. Off
+// unless set to exactly 1. Never set it anywhere else.
+const CRASH_AFTER_CONFIRM = process.env.RELAY_CRASH_AFTER_CONFIRM === '1';
+
 const errorText = (error: unknown): string => {
   const { message, errors } = error as { message?: string; errors?: Error[] };
   return message || errors?.[0]?.message || String(error);
@@ -38,7 +43,19 @@ async function main(): Promise<void> {
   log(
     `polling outbox: batch ${DEFAULTS.batchSize}, every ${DEFAULTS.pollMs} ms, max attempts ${DEFAULTS.maxAttempts}`,
   );
-  await runRelay(dataSource, publisher, { signal: stopping.signal, log });
+  await runRelay(dataSource, publisher, {
+    signal: stopping.signal,
+    log,
+    options: {
+      ...DEFAULTS,
+      afterConfirms: CRASH_AFTER_CONFIRM
+        ? () => {
+            log('RELAY_CRASH_AFTER_CONFIRM=1: SIGKILL after the confirms, before the UPDATE');
+            process.kill(process.pid, 'SIGKILL');
+          }
+        : undefined,
+    },
+  });
 
   await publisher.close();
   await dataSource.destroy();

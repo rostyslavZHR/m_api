@@ -22,7 +22,7 @@ import {
   startConsumer,
   waitForDepth,
 } from './lib.js';
-import { countInvoices, openShop } from './shop.js';
+import { openAppDb } from './run.js';
 
 // The reasons RabbitMQ gives a dead letter.
 const DEATH_REASONS = ['rejected', 'expired', 'maxlen', 'delivery_limit'];
@@ -46,8 +46,8 @@ async function peekDeathReason(broker: Broker): Promise<string> {
 await runDemo('demo:dlq', async (onCleanup) => {
   const broker = await resetBroker(requireEnv('RABBITMQ_URL'));
   onCleanup(() => broker.connection.close());
-  const shop = await openShop();
-  onCleanup(() => shop.close());
+  const db = await openAppDb();
+  onCleanup(() => db.destroy());
 
   const consumer = startConsumer();
   if (!(await consumer.waitFor((lines) => linesOf(lines, 'ready').length > 0, 10_000))) {
@@ -102,7 +102,12 @@ await runDemo('demo:dlq', async (onCleanup) => {
   // Measured after the peek, so the printed depth is what the DLQ holds at the end.
   const work = await settledDepth(broker.channel, INVOICING_QUEUE);
   const dlq = await settledDepth(broker.channel, DEAD_LETTER_QUEUE);
-  const effect = await countInvoices(shop.dataSource, [eventId]);
+  // The poison never reaches the inbox: no processed_messages row for its id (and
+  // so no invoice). Compared as text: its id is digits, not a uuid.
+  const [{ effect }] = (await db.query(
+    'SELECT count(*)::int AS effect FROM processed_messages WHERE message_id::text = $1',
+    [eventId],
+  )) as { effect: number }[];
   const rejected = linesOf(consumer.lines, 'rejected');
 
   printResults([
