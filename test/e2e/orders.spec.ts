@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import request from 'supertest';
 import type { Repository } from 'typeorm';
-import { JobEntity, OrderEntity, ProductEntity, UserEntity } from '../../src/entities/index.js';
+import { IdempotencyKeyEntity, JobEntity, OrderEntity, OutboxEntity, ProductEntity, UserEntity } from '../../src/entities/index.js';
 import { ProductsRepository } from '../../src/products/products.repository.js';
 import { createTestApp } from '../integration/testkit/app.js';
 import { aProduct, aUser } from '../integration/testkit/builders.js';
@@ -61,7 +61,13 @@ describe('Orders API (e2e)', () => {
     expect((await db.admin.manager.findOneByOrFail(ProductEntity, { id: product.id })).stock).toBe(3);
   });
 
-  it('replays the same order for a repeated Idempotency-Key, and writes it once', async () => {
+  // Orders and their outbox rows, checked in the container itself.
+  const counts = async () => ({
+    orders: await db.admin.manager.count(OrderEntity),
+    outbox: await db.admin.manager.count(OutboxEntity),
+  });
+
+  it('the same Idempotency-Key twice in a row: one order, one event, the same response', async () => {
     const user = await aUser().insertVia(users);
     const product = await aProduct().insertVia(products);
     const key = randomUUID();
@@ -70,7 +76,55 @@ describe('Orders API (e2e)', () => {
     const second = await api().post('/orders').set('Idempotency-Key', key).send(orderBody(user, product, 1)).expect(201);
 
     expect(second.body).toEqual(first.body);
-    expect(await db.admin.manager.count(OrderEntity)).toBe(1);
+    expect(first.headers['idempotent-replayed']).toBeUndefined();
+    expect(second.headers['idempotent-replayed']).toBe('true');
+    expect(await counts()).toEqual({ orders: 1, outbox: 1 });
+    expect(await db.admin.manager.findOneByOrFail(IdempotencyKeyEntity, { key })).toMatchObject({
+      userId: user.id,
+      orderId: String(first.body.id),
+    });
+  });
+
+  it('the same Idempotency-Key twice at the same moment: one order, one event, both get it', async () => {
+    const user = await aUser().insertVia(users);
+    const product = await aProduct().withStock(5).insertVia(products);
+    const key = randomUUID();
+    const send = () => api().post('/orders').set('Idempotency-Key', key).send(orderBody(user, product, 1));
+
+    // The second request's key insert waits on the first one's until it commits.
+    const [a, b] = await Promise.all([send(), send()]);
+
+    expect([a.status, b.status]).toEqual([201, 201]);
+    expect(a.body.id).toBe(b.body.id);
+    expect([a.headers['idempotent-replayed'], b.headers['idempotent-replayed']].filter(Boolean)).toEqual(['true']);
+    expect(await counts()).toEqual({ orders: 1, outbox: 1 });
+    expect((await db.admin.manager.findOneByOrFail(ProductEntity, { id: product.id })).stock).toBe(4);
+  });
+
+  it('the same Idempotency-Key with a different body: 422, and no second order', async () => {
+    const user = await aUser().insertVia(users);
+    const product = await aProduct().withStock(5).insertVia(products);
+    const key = randomUUID();
+
+    await api().post('/orders').set('Idempotency-Key', key).send(orderBody(user, product, 1)).expect(201);
+    const misuse = await api().post('/orders').set('Idempotency-Key', key).send(orderBody(user, product, 2)).expect(422);
+
+    expect(misuse.headers['content-type']).toMatch(/application\/problem\+json/);
+    expect(await counts()).toEqual({ orders: 1, outbox: 1 });
+  });
+
+  it('the same Idempotency-Key from two users: two orders, one each (keys are per user)', async () => {
+    const alice = await aUser().insertVia(users);
+    const bob = await aUser().insertVia(users);
+    const product = await aProduct().withStock(5).insertVia(products);
+    const key = randomUUID();
+
+    const a = await api().post('/orders').set('Idempotency-Key', key).send(orderBody(alice, product, 1)).expect(201);
+    const b = await api().post('/orders').set('Idempotency-Key', key).send(orderBody(bob, product, 1)).expect(201);
+
+    expect(a.body.id).not.toBe(b.body.id);
+    expect(b.headers['idempotent-replayed']).toBeUndefined();
+    expect(await counts()).toEqual({ orders: 2, outbox: 2 });
   });
 
   it('answers 404 with a problem body for an order that does not exist', async () => {

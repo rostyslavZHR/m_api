@@ -1,4 +1,4 @@
-import { isDeepStrictEqual } from 'node:util';
+import { createHash } from 'node:crypto';
 import {
   BadRequestException,
   ConflictException,
@@ -8,7 +8,7 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
-import { checkout } from '../checkout/checkout.js';
+import { checkoutWithKey } from '../checkout/checkout.js';
 import {
   InsufficientFundsError,
   OutOfStockError,
@@ -68,6 +68,23 @@ export interface OwnedOrder {
   lastEventId: number | null;
 }
 
+// sha256 of the canonical request body: fixed key order, items sorted by product,
+// so the same order written differently (items in another order, extra spaces)
+// gives the same fingerprint. Only detects misuse of a key (same key, different
+// body); never used as the key, or two identical orders placed on purpose would
+// merge into one.
+const requestFingerprint = (body: CreateOrder): string =>
+  createHash('sha256')
+    .update(
+      JSON.stringify({
+        user_id: body.user_id,
+        items: [...body.items]
+          .sort((a, b) => a.product_id - b.product_id)
+          .map(({ product_id, quantity }) => ({ product_id, quantity })),
+      }),
+    )
+    .digest('hex');
+
 // bigint columns arrive as strings; these values are far below 2^53.
 const toOrder = (entity: OrderEntity): Order => ({
   id: Number(entity.id),
@@ -83,13 +100,6 @@ const toOrder = (entity: OrderEntity): Order => ({
 @Injectable()
 export class OrdersService {
   private readonly logger = new Logger(OrdersService.name);
-
-  // Replays for Idempotency-Key. In memory, so per process and lost on restart;
-  // a table with a unique key is the durable version.
-  private readonly idempotencyKeys = new Map<
-    string,
-    { body: CreateOrder; order: Order }
-  >();
 
   constructor(
     private readonly dataSource: DataSource,
@@ -119,17 +129,13 @@ export class OrdersService {
     return { items: page.map(toOrder), next_cursor };
   }
 
-  async create(idempotencyKey: string, body: CreateOrder): Promise<Order> {
-    const replay = this.idempotencyKeys.get(idempotencyKey);
-    if (replay) {
-      if (!isDeepStrictEqual(replay.body, body)) {
-        throw new UnprocessableEntityException(
-          'This Idempotency-Key was already used with a different request body.',
-        );
-      }
-      return replay.order;
-    }
-
+  // Idempotency-Key (level 3), stored in idempotency_keys and claimed inside the
+  // checkout transaction (checkoutWithKey), so it survives a restart and is shared
+  // by every instance. `replayed` tells the controller to add Idempotent-Replayed.
+  async create(
+    idempotencyKey: string,
+    body: CreateOrder,
+  ): Promise<{ order: Order; replayed: boolean }> {
     const productIds = body.items.map((item) => item.product_id);
     if (new Set(productIds).size !== productIds.length) {
       throw new BadRequestException(
@@ -137,15 +143,20 @@ export class OrdersService {
       );
     }
 
-    let created: OrderEntity;
+    const fingerprint = requestFingerprint(body);
+    let result: Awaited<ReturnType<typeof checkoutWithKey>>;
     try {
-      created = await checkout(this.dataSource, {
-        userId: String(body.user_id),
-        items: body.items.map((item) => ({
-          productId: String(item.product_id),
-          quantity: item.quantity,
-        })),
-      });
+      result = await checkoutWithKey(
+        this.dataSource,
+        {
+          userId: String(body.user_id),
+          items: body.items.map((item) => ({
+            productId: String(item.product_id),
+            quantity: item.quantity,
+          })),
+        },
+        { key: idempotencyKey, fingerprint },
+      );
     } catch (error) {
       if (
         error instanceof OutOfStockError ||
@@ -156,11 +167,18 @@ export class OrdersService {
       throw error;
     }
 
-    // Read back, so the response is what the database holds.
-    const order = await this.getById(Number(created.id));
-    this.idempotencyKeys.set(idempotencyKey, { body, order });
-
-    return order;
+    if (result.replayed && result.fingerprint !== fingerprint) {
+      throw new UnprocessableEntityException(
+        'This Idempotency-Key was already used with a different request body.',
+      );
+    }
+    // Read back, so the response is what the database holds. A replay returns the
+    // same order as the first response; its status is the current one.
+    const orderId = result.replayed ? result.orderId : result.order.id;
+    return {
+      order: await this.getById(Number(orderId)),
+      replayed: result.replayed,
+    };
   }
 
   async updateStatus({ id, to }: UpdateStatus): Promise<Order> {
