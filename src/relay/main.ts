@@ -12,9 +12,14 @@ const log = (message: string) =>
   console.error(`[relay ${process.pid}] ${message}`);
 
 // DEMO ONLY (npm run demo:crash-relay): SIGKILL this process after a batch's confirms
-// and before its rows are marked published: a real crash at the worst moment. Off
-// unless set to exactly 1. Never set it anywhere else.
-const CRASH_AFTER_CONFIRM = process.env.RELAY_CRASH_AFTER_CONFIRM === '1';
+// and before its rows are marked published: a real crash at the worst moment.
+// Honoured only with both variables set to exactly 1 (the demo sets both) and never
+// with NODE_ENV=production, so one stray variable can't switch it on.
+const CRASH_REQUESTED = process.env.RELAY_CRASH_AFTER_CONFIRM === '1';
+const CRASH_AFTER_CONFIRM =
+  CRASH_REQUESTED &&
+  process.env.DEMO_RUN === '1' &&
+  process.env.NODE_ENV !== 'production';
 
 const errorText = (error: unknown): string => {
   const { message, errors } = error as { message?: string; errors?: Error[] };
@@ -40,6 +45,9 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => stop('SIGTERM'));
   process.on('SIGINT', () => stop('SIGINT'));
 
+  if (CRASH_REQUESTED && !CRASH_AFTER_CONFIRM) {
+    log('RELAY_CRASH_AFTER_CONFIRM ignored: needs DEMO_RUN=1 and NODE_ENV not production');
+  }
   log(
     `polling outbox: batch ${DEFAULTS.batchSize}, every ${DEFAULTS.pollMs} ms, max attempts ${DEFAULTS.maxAttempts}`,
   );

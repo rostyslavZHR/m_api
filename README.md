@@ -6,7 +6,40 @@
 
 ## Grading
 
-The DB scripts, the RabbitMQ scripts and the app normally load credentials from the local store through `scripts/with-secrets.sh`. On a fresh clone there is no store, so the values come from the environment instead (`SKIP_VAULT=1`). They're the dev-only bootstrap accounts committed in [docker-compose.yml](docker-compose.yml), not secrets. The environment takes precedence over `.env`, whose `RABBITMQ_URL` is only a placeholder.
+HW#22 (Outbox та ідемпотентність). From a fresh clone, in the repository root (where `package.json` is). Nothing needs to be running but Docker: each demo builds, applies pending migrations, sets up the RabbitMQ topology and starts its own relay and consumer (see [The demos](#the-demos)).
+
+The scripts normally load credentials from the local store through `scripts/with-secrets.sh`. A fresh clone has no store, so the values come from the environment (`SKIP_VAULT=1`). They're the dev-only bootstrap accounts committed in [docker-compose.yml](docker-compose.yml), [init.sql](init.sql) and [pgbouncer/userlist.txt](pgbouncer/userlist.txt), not secrets:
+- `DB_URL`: the app's connection, `app_user` through PgBouncer. The app ignores any password in it and reads `secrets/db_password` (gitignored), so the block creates that file.
+- `MIGRATIONS_DB_URL`: the schema owner. The demos apply migrations with it, and `demo:crash-write` creates its temporary trigger with it (`app_user` can't).
+- `RABBITMQ_URL`: the brief's `BROKER_URL`, under the name the code reads. Host port 21113 is the AMQP port (5672 in the container), not the UI's 21114.
+
+```bash
+docker compose up -d --wait
+
+export DB_URL=postgres://app_user@localhost:21111/shop
+export MIGRATIONS_DB_URL=postgres://admin:admin-bootstrap-only@localhost:21110/shop
+export RABBITMQ_URL=amqp://app:rabbitmq-dev-only@127.0.0.1:21113
+export SKIP_VAULT=1
+mkdir -p secrets && printf 'app-v1-password' > secrets/db_password
+
+npm ci
+
+npm run demo:outbox; echo "exit=$?"
+npm run demo:crash-write; echo "exit=$?"
+npm run demo:crash-relay; echo "exit=$?"
+```
+
+| Demo | stdout (exactly these lines) | Takes, with the build |
+|---|---|---|
+| `demo:outbox` | `requests=2` `orders=1` `outbox=1` `published=1` `deliveries=1` `effect=1` `processed=1` | 6–7 s |
+| `demo:crash-write` | `write-failed=1` `orders=0` `outbox=0` `published=0` `deliveries=0` `effect=0` | 6–7 s |
+| `demo:crash-relay` | `published=1` `deliveries=2` `applied=1` `effect=1` `processed=1` | ~4 s |
+
+Each npm script runs `npm run build` first (about 3 s of each time). Exit codes: `0` every check held, `1` a check failed (the lines are still printed, and stderr names the failed check), `2` setup failed (no result lines). Each demo can be rerun any number of times. Measured on a fresh clone with only the variables above, each demo twice. HW#19's `npm run demo:dlq` still passes too, after any of them has built `dist/`.
+
+### HW#15 and earlier: database, PgBouncer, backup (historical)
+
+The original setup, which the historical HW#16–19 blocks below build on. The environment takes precedence over `.env`, whose `RABBITMQ_URL` is only a placeholder.
 
 ```bash
 docker compose up -d --wait
@@ -14,7 +47,6 @@ docker compose up -d --wait
 export DB_URL=postgres://app_user@localhost:21111/shop
 export SKIP_VAULT=1
 export MIGRATIONS_DB_URL=postgres://admin:admin-bootstrap-only@localhost:21110/shop
-# The brief's BROKER_URL: the code reads it as RABBITMQ_URL (host port 21113 → AMQP 5672).
 export RABBITMQ_URL=amqp://app:rabbitmq-dev-only@127.0.0.1:21113
 
 cp .env.example .env
@@ -58,9 +90,9 @@ The row counts are `11|11|60|120` after the first seed and after the second — 
 
 Optional: `DEMO_COMPARE=1 npm run demo:workers` and `DEMO_COMPARE=1 npm run demo:retry` add the contrast runs — the same work without `SKIP LOCKED`, and under `READ COMMITTED` — see [Concurrency](#concurrency).
 
-### HW#16: tests and the contract gate
+### HW#16: tests and the contract gate (historical)
 
-Needs Docker running (Testcontainers starts its own Postgres) and the setup above: `secrets/db_password` created, `docker compose up -d --wait` (it also starts the Pact broker on 21112). `PACT_BROKER_URL` is set only on the gate commands; everything before them verifies the local pact file. Run from a clean tree: the gate's version is the commit SHA.
+Needs Docker running (Testcontainers starts its own Postgres) and the [HW#15 setup](#hw15-and-earlier-database-pgbouncer-backup-historical): `secrets/db_password` created, `docker compose up -d --wait` (it also starts the Pact broker on 21112). `PACT_BROKER_URL` is set only on the gate commands; everything before them verifies the local pact file. Run from a clean tree: the gate's version is the commit SHA.
 
 ```bash
 npm ci && npx tsc --noEmit
@@ -100,9 +132,9 @@ grep -rnE "PACT_BROKER_TOKEN[\"']?[[:space:]]*[:=][[:space:]]*[\"'][^\"'$]" --in
 | Vault wrapper | `test -f scripts/with-secrets.sh && grep -q SKIP_VAULT scripts/with-secrets.sh` |
 | No literal token | the `PACT_BROKER_TOKEN` grep above → no output |
 
-### HW#18: real-time order status
+### HW#18: real-time order status (historical)
 
-Run this after the setup at the top of [Grading](#grading): DB up, `.env` and `secrets/db_password` in place, migrations applied, `npm run seed` done. Start the app in a second terminal, after running the same `export` lines there: the app needs `RABBITMQ_URL`, and fails fast at startup without a valid one. The build is `tsc`, through `nest build`; `tsx` would not work, because it doesn't emit the decorator metadata Nest's dependency injection needs:
+Run this after the [HW#15 setup](#hw15-and-earlier-database-pgbouncer-backup-historical): DB up, `.env` and `secrets/db_password` in place, migrations applied, `npm run seed` done. Start the app in a second terminal, after running the same `export` lines there: the app needs `RABBITMQ_URL`, and fails fast at startup without a valid one. The build is `tsc`, through `nest build`; `tsx` would not work, because it doesn't emit the decorator metadata Nest's dependency injection needs:
 
 ```bash
 npm run build && node dist/main.js     # listens on PORT from .env: http://localhost:3000
@@ -149,7 +181,7 @@ node scripts/realtime-demo.mjs --same-room; echo "exit=$?"   # A_RECEIVED=1  B_R
 
 The [trade-offs](#trade-offs-websocket-vs-sse) and the [known gaps](#real-time-known-gaps) are further down.
 
-### HW#19: RabbitMQ order.placed
+### HW#19 grading (historical): RabbitMQ order.placed
 
 > **Superseded in HW#22.** Since the outbox, `POST /orders` no longer publishes; a separate relay process does. `demo:publish` and `demo:duplicate` watched the publisher inside their own process, so they stopped working, and they're **removed**: `demo:outbox` and `demo:crash-relay` replace them (see [The demos](#the-demos)). `demo:dlq` still runs as described. The block below is HW#19 as graded, for the record.
 
@@ -160,7 +192,6 @@ docker compose up -d --wait
 
 export DB_URL=postgres://app_user@localhost:21111/shop
 export MIGRATIONS_DB_URL=postgres://admin:admin-bootstrap-only@localhost:21110/shop
-# The brief's BROKER_URL: the code reads it as RABBITMQ_URL (host port 21113 → AMQP 5672).
 export RABBITMQ_URL=amqp://app:rabbitmq-dev-only@127.0.0.1:21113
 export SKIP_VAULT=1
 
@@ -404,7 +435,7 @@ An example (ids vary per run):
 
 ### Publishing
 
-> **Replaced in HW#22.** `POST /orders` no longer publishes: checkout writes the event to the `outbox` table in the order's transaction, and the relay publishes it ([Transactional outbox](#transactional-outbox-hw22)). This section describes HW#19's direct publish, whose publisher the relay reuses.
+> **Replaced in HW#22.** `POST /orders` no longer publishes: checkout writes the event to the `outbox` table in the order's transaction, and the relay publishes it ([Outbox та ідемпотентність](#outbox-та-ідемпотентність-hw22-transactional-outbox-and-idempotency)). This section describes HW#19's direct publish, whose publisher the relay reuses.
 
 - **After the commit, never inside the transaction:** `OrdersService.create` publishes once `checkout()` has returned. Inside the retrying transaction callback, a rolled-back attempt would publish an order that doesn't exist. An Idempotency-Key replay doesn't publish again.
 - **Each message waits for its own broker confirm**, with a **2 s budget** that includes connecting. `POST /orders` waits up to 2 s when the broker is down or not answering. A failure was logged with `eventId` and `orderId`, and the order was still `201`. Until the outbox, `GET /health` also counted those losses (`orderPlacedUnpublished`); that counter is gone with the direct publish, since the order path can no longer lose an event.
@@ -514,7 +545,7 @@ These were measured by breaking the code on purpose. In three of the five delibe
 - **Run `npm run rabbitmq:bootstrap` before starting the consumer.** The consumer declares exchanges and queues, but AMQP can't set policies. Without them, `shop.invoicing` has no dead-letter exchange, only quorum's built-in delivery limit of 20, so a poison message is **dropped** after 20 attempts instead of being parked in `shop.dlq`. It's safe to re-run.
 - **`shop.unrouted` should stay empty.** A non-zero depth means a publisher sends a routing key nothing is bound to. Check it with `docker compose exec -T rabbitmq rabbitmqctl -q list_queues name messages`, or in the UI at http://localhost:21114.
 
-## Transactional outbox (HW#22)
+## Outbox та ідемпотентність (HW#22: transactional outbox and idempotency)
 
 HW#19 publishes `order.placed` after the commit, so an event is lost if the broker is down at that moment. The outbox closes that gap: the event is written to the `outbox` table in the same transaction as the order, and a relay publishes it later. The consumer side records what it has processed in `processed_messages`.
 
@@ -581,10 +612,10 @@ Before taking any locks, the relay checks that the broker is reachable. During a
 - **Parked rows:** a row that failed 10 times (the broker reachable, but no confirm) is skipped from then on and logged `PARKED: …`. It needs a person, who can reset its `attempts`.
 - **The backlog signal:** every 10 s the relay logs `backlog: pending=<n> oldest=<s>s parked=<n>`. It replaces HW#19's `/health` counter.
 - **SIGTERM** finishes the current batch, then closes the broker connection and the DB.
-- **Ordering:** one relay publishes in `created_at, id` order. `ORDER BY` is the order rows are **selected**, not the order they're **delivered**: with several relays, or after a retry, events can arrive out of order.
+- **Ordering:** see [Ordering](#ordering) below.
 - **Unroutable messages:** a confirm only means "the broker took it". A row whose `type` matches no binding goes to `shop.unrouted` through HW#19's alternate exchange, is confirmed, and is marked published, so `shop.unrouted` must stay empty.
 
-**Why mark only after the confirm, never before:** marking first and publishing second loses events. With a publisher that failed, the row was marked `published_at`, and the message was **nowhere**: not in `shop.invoicing`, the DLQ or `shop.unrouted`. And because the row looked published, the relay never retried it. The other order (confirm, then mark) can only duplicate: if the relay dies between the confirm and the UPDATE, the row stays waiting and is published again. That was measured too, with the same event in the queue twice and its row marked once. Consumers deduplicate by `eventId`, so a duplicate is harmless; a lost event isn't recoverable.
+**Why mark only after the confirm, never before:** see [Why publish and `UPDATE published_at` can't be swapped](#why-publish-and-update-published_at-cant-be-swapped).
 
 **Measured:**
 
@@ -675,7 +706,7 @@ Each demo starts from nothing but `docker compose up -d --wait`:
 It then creates a **fresh user and product**, and every count is scoped to that user. The dev data, the seed, earlier runs and old outbox rows published meanwhile don't change the numbers, so each demo can be run any number of times. The relay and the consumer run as **child processes** (the real `dist/relay/main.js` and `dist/consumer/main.js`) and are killed at the end whatever happens. stdout carries only the `key=value` lines; logs go to stderr. Exit codes: `0` all checks held, `1` a check failed (lines still printed), `2` setup failed.
 
 ```
-$ npm run demo:outbox          # ~7 s with the build, exit=0
+$ npm run demo:outbox          # 6–7 s with the build, exit=0
 requests=2
 orders=1
 outbox=1
@@ -684,7 +715,7 @@ deliveries=1
 effect=1
 processed=1
 
-$ npm run demo:crash-write     # ~7 s, exit=0
+$ npm run demo:crash-write     # 6–7 s with the build, exit=0
 write-failed=1
 orders=0
 outbox=0
@@ -692,7 +723,7 @@ published=0
 deliveries=0
 effect=0
 
-$ npm run demo:crash-relay     # ~5 s, exit=0
+$ npm run demo:crash-relay     # ~4 s with the build, exit=0
 published=1
 deliveries=2
 applied=1
@@ -705,6 +736,7 @@ processed=1
   - **The failure mechanism:** a temporary trigger on the transaction's last statement (`UPDATE idempotency_keys`, after the outbox insert). It's created with the schema owner's credentials (`app_user` can't create triggers), limited to the run's user by a `WHEN` clause, and dropped afterwards. There's no hook in the application code.
   - **Why that statement:** the trigger isn't on the outbox insert itself, because failing that statement also fails an outbox insert that escaped the transaction, and the demo couldn't catch that trap.
 - **`demo:crash-relay`: at-least-once delivery, exactly one effect.** The relay dies **by SIGKILL after the broker confirmed the event and before it marked the row published**. A fresh relay publishes the same event again, and the consumer gets it twice, applies it once and skips it once (`duplicate`). **The kill mechanism:** a real `kill -9` at an exact point: the relay child runs with the demo-only `RELAY_CRASH_AFTER_CONFIRM=1`, and its `afterConfirms` hook SIGKILLs it there. The demo checks the exit signal, and that the row was still waiting after the crash.
+  - **`RELAY_CRASH_AFTER_CONFIRM` exists only for `demo:crash-relay`.** The relay honours it only together with `DEMO_RUN=1`, and never under `NODE_ENV=production`; otherwise it logs that the switch was ignored.
 
 **Each demo catches its broken counterpart** (measured, each restored afterwards):
 
@@ -713,6 +745,33 @@ processed=1
 | A non-idempotent consumer (no inbox, no `ON CONFLICT`, the unique `order_id` dropped) | `demo:crash-relay` | `applied=2 effect=2 processed=0`, exit 1 |
 | The outbox insert outside the transaction (the DataSource's own manager) | `demo:crash-write` | `outbox=1 published=1 deliveries=1`: an event for an order that doesn't exist, exit 1 |
 | The relay marks (and commits) first, publishes after | `demo:crash-relay` | `deliveries=1`: the restarted relay sees the row as published and sends nothing, exit 1 |
+
+### Why publish and `UPDATE published_at` can't be swapped
+
+The relay publishes, waits for the broker's confirm, and only then sets `published_at`. Swapped, a duplicate becomes a loss:
+- **Mark first, publish second:** once the mark commits, any crash or failed publish loses the event. The row says "sent", the relay never looks at it again, and nothing will ever send it. Measured twice: a failing publisher left a marked row whose message was nowhere (not in `shop.invoicing`, the DLQ or `shop.unrouted`); and `demo:crash-relay` with the swap gave `deliveries=1`, because the restarted relay saw the row as sent.
+- **Publish first, mark second:** the same crash, between the confirm and the UPDATE, leaves the row waiting, so it's published again. That's a duplicate, and the idempotent consumer absorbs it: `demo:crash-relay` gives `deliveries=2`, `effect=1`.
+- **A publish error doesn't even mean "not delivered".** A confirm timeout or a dropped connection can come after the broker already stored the message. So no order of the two steps gives exactly-once: the choice is between a possible duplicate and a possible loss, and only a duplicate can be undone (consumers deduplicate by `eventId`). Hence at-least-once delivery plus idempotent consumers.
+
+### Ordering
+
+- One relay publishes in `created_at, id` order, but **`ORDER BY` is the order rows are selected, not the order they're delivered.** With several relays (`SKIP LOCKED` gives each its own rows), after a publish that fails and is retried in a later batch, or with the consumer handling up to 10 messages at once (its prefetch), a later event can be processed first.
+- **Here it doesn't matter:** each order has one event, `order.placed`, and invoices for different orders are independent.
+- **If per-order sequence mattered** (say `order.placed` → `order.paid` → `order.cancelled`): each event would carry a per-order sequence number written in the same transaction (e.g. a `version` column on `orders`), and the consumer would apply only `last + 1`. It would skip `≤ last` as a duplicate, and requeue or park anything further ahead. Routing by `aggregate_id` to one consumer (a consistent-hash exchange, or a single-active-consumer queue) would keep most events in order, but only the sequence check guarantees it.
+
+### Cleanup
+
+- **`npm run outbox:cleanup`** ([src/cleanup-outbox.ts](src/cleanup-outbox.ts)) deletes outbox rows published more than 7 days ago. Waiting and parked rows are never deleted. Meant to run periodically (cron, like `backup.cron`); safe to run any time.
+- **At a larger volume:** partition `outbox` by `created_at` (e.g. daily) and drop old partitions instead of deleting rows: no dead tuples, no vacuum work. The partial index keeps the relay's scan as small as the backlog either way.
+- **`processed_messages`** grows by one row per event per consumer. The plan: delete rows older than any redelivery could be (e.g. 30 days). A duplicate arriving later still meets the natural key `invoices.order_id`. Not scripted yet.
+- **`idempotency_keys`:** `npm run idempotency:cleanup`, 24 h (see [level 3](#idempotency-key-at-the-api-edge-level-3)).
+
+### Carried over from earlier phases
+
+- **`RABBITMQ_URL` is the brief's `BROKER_URL`:** one name for one secret, as stored since HW#19 (see Decisions, above).
+- **Debezium's column names:** the outbox uses snake_case (`aggregate_type`, `aggregate_id`); a move to CDC would set `route.by.field=aggregate_type` and `table.field.event.key=aggregate_id`.
+- **`user_id` comes from the request body,** since the API has no auth. In a real app it comes from the auth token, and so does the Idempotency-Key's scope.
+- **The `order.placed` v1 → v2 transition:** in dev the queue was purged; in production, deploy the reader that accepts both versions first, then switch the producer to v2.
 
 ## Database: schema, seed, indexes
 

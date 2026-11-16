@@ -285,12 +285,17 @@ export interface Relay {
 }
 
 // The real relay (dist/relay/main.js), with this process's environment.
-// `crashAfterConfirm` sets its demo-only kill switch. Its stdout (the publisher's
-// Nest logger) goes to our stderr, so stdout keeps only the result lines.
+// `crashAfterConfirm` sets its demo-only kill switch (both variables it needs). Its
+// stdout (the publisher's Nest logger) goes to our stderr, so stdout keeps only the
+// result lines.
 export function startRelay({ crashAfterConfirm = false } = {}): Relay {
   const env = { ...process.env };
-  if (crashAfterConfirm) env.RELAY_CRASH_AFTER_CONFIRM = '1';
-  else delete env.RELAY_CRASH_AFTER_CONFIRM;
+  delete env.RELAY_CRASH_AFTER_CONFIRM;
+  delete env.DEMO_RUN;
+  if (crashAfterConfirm) {
+    env.RELAY_CRASH_AFTER_CONFIRM = '1';
+    env.DEMO_RUN = '1';
+  }
 
   const child = spawn(process.execPath, [RELAY_ENTRY], {
     env,

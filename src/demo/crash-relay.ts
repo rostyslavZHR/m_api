@@ -5,8 +5,8 @@
 //
 // published=1 deliveries=2 applied=1 effect=1 processed=1
 //
-// The kill: the relay's demo-only switch RELAY_CRASH_AFTER_CONFIRM=1 makes it
-// SIGKILL itself between the confirms and the UPDATE: a real kill -9 at an exact
+// The kill: the relay's demo-only switch (RELAY_CRASH_AFTER_CONFIRM=1 with
+// DEMO_RUN=1, ignored under NODE_ENV=production) makes it SIGKILL itself between the confirms and the UPDATE: a real kill -9 at an exact
 // point, no race.
 import { checkout } from '../checkout/checkout.js';
 import {
