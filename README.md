@@ -1050,11 +1050,13 @@ Environment variables are validated on startup by [src/config/env.schema.ts](src
 | `DB_URL`                     | `.env`                   | the app, `demo:race`, `demo:workers`, `demo:retry` |
 | DB password (not an env var) | `secrets/db_password`    | the app and the same three demos                   |
 | `MIGRATIONS_DB_URL`          | `.secrets/infisical.env` | `migrate*`, `seed`, `demo:nplus1`, `report`        |
+| `REDIS_CACHE_URL`, `REDIS_QUEUE_URL` | `.secrets/infisical.env` | the app, the relay, the consumer      |
 
 - **`PORT`:** the port the HTTP server listens on. Template for `.env`: `.env.example`.
 - **`DB_URL`:** Postgres connection string (`postgres://user@host:port/database`), pointing at PgBouncer (`localhost:21111`), not Postgres — see [PgBouncer](#pgbouncer). Any password segment is ignored — a password embedded in an env var can't be rotated without a restart, which defeats the point below, so the pool always gets its password from `secrets/db_password` instead.
 - **DB password:** a gitignored secret file (HW#11), rotated by `rotate.sh`. Read fresh on every new connection, so the password rotates without a restart. See [Database password](#database-password).
 - **`MIGRATIONS_DB_URL`:** connection string for the TypeORM CLI and DB scripts, as the schema owner (migrations run DDL, which `app_user` can't). Loaded by `scripts/with-secrets.sh` from the gitignored store. Not read by the app, so it isn't in `.env.example` — `check:env` would reject it. See [DB scripts and secrets](#db-scripts-and-secrets).
+- **`REDIS_CACHE_URL`, `REDIS_QUEUE_URL`:** the two Redis instances (HW#23), `redis-cache` on 127.0.0.1:21115 and `redis-queue` on 127.0.0.1:21116. The dev instances have no password and listen on 127.0.0.1 only; production would put Redis on a private network with `AUTH` or ACLs (a user per service, limited to its commands and keys), with the credentials only in the vault.
 
 Copy [.env.example](.env.example) to `.env` and adjust as needed:
 

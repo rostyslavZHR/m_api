@@ -102,8 +102,55 @@ services:
       retries: 12
       start_period: 20s
 
+  # Two Redis instances, because maxmemory and the eviction policy are per instance
+  # (SELECT 1 on one instance would share both). No password: dev-only, and the
+  # ports listen on 127.0.0.1 only.
+  #
+  # The cache: refilled from the database, so nothing worth keeping. A small
+  # maxmemory (a dev setting a demo fills in seconds; production sizes it from real
+  # data) with allkeys-lru, and no persistence at all.
+  redis-cache:
+    image: redis:8.10.3-alpine
+    command: >
+      redis-server
+      --maxmemory 32mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --appendonly no
+    ports:
+      - "127.0.0.1:21115:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  # The queue (BullMQ jobs, and sessions): an evicted or lost key is a lost job or
+  # a logged-out user. noeviction (a full instance refuses writes instead of
+  # dropping keys), AOF fsynced every second, on a volume. The maxmemory makes a
+  # runaway queue fail with clean OOM errors instead of growing until the
+  # container is killed (dev size; production sizes it from the backlog it must hold).
+  redis-queue:
+    image: redis:8.10.3-alpine
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy noeviction
+      --appendonly yes
+      --appendfsync everysec
+    ports:
+      - "127.0.0.1:21116:6379"
+    volumes:
+      - redis-queue-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
 volumes:
   pgdata:
   pact-broker-data:
   rabbitmq-data:
+  redis-queue-data:
   

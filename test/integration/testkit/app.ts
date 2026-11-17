@@ -23,6 +23,9 @@ export async function createTestApp(db: TestDatabase): Promise<NestExpressApplic
   // Required by the env schema. The suites don't use RabbitMQ: a port nothing
   // listens on, so they never depend on a running broker.
   process.env.RABBITMQ_URL = 'amqp://127.0.0.1:1';
+  // The same for Redis, until a suite needs it.
+  process.env.REDIS_CACHE_URL = 'redis://127.0.0.1:1';
+  process.env.REDIS_QUEUE_URL = 'redis://127.0.0.1:1';
   const { AppModule } = await import('../../../src/app.module.js');
 
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();

@@ -6,6 +6,7 @@ import { ConfigModule } from '@nestjs/config';
 import { HealthCheckModule } from './health-check/health-check.module.js';
 import { DbModule } from './db/db.module.js';
 import { RealtimeModule } from './realtime/realtime.module.js';
+import { RedisModule } from './redis/redis.module.js';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { RealtimeModule } from './realtime/realtime.module.js';
     OrdersModule,
     HealthCheckModule,
     DbModule,
+    RedisModule,
     RealtimeModule,
   ],
 })
