@@ -5,6 +5,7 @@ import { UserEntity } from '../../src/entities/index.js';
 import { OrdersRepository } from '../../src/orders/orders.repository.js';
 import { cardQueries, ProductsRepository } from '../../src/products/products.repository.js';
 import { CARD_TTL, cardKey, ProductsService } from '../../src/products/products.service.js';
+import { lockKey, releaseLock } from '../../src/redis/cache-aside.js';
 import { closeRedis, createCacheClient } from '../../src/redis/redis-clients.js';
 import { aProduct, aUser, anOrder } from './testkit/builders.js';
 import { startTestDatabase, type TestDatabase } from './testkit/postgres.js';
@@ -136,5 +137,56 @@ describe('Product card cache (cache-aside)', () => {
       await cache.cli('CONFIG', 'SET', 'maxmemory', '32mb');
       await cache.cli('CONFIG', 'SET', 'maxmemory-policy', 'allkeys-lru');
     }
+  });
+
+  describe('single flight (the stampede lock)', () => {
+    it('30+ concurrent reads of a missing key: 1 database call, the same card for everyone', async () => {
+      const product = await aProduct().insertVia(products);
+
+      const [results, calls] = await dbCalls(() =>
+        Promise.all(Array.from({ length: 40 }, () => service.getCard(Number(product.id)))),
+      );
+
+      expect(calls).toBe(1);
+      for (const { card } of results) expect(card).toStrictEqual(results[0].card);
+    });
+
+    it('a lock is released only with its own token', async () => {
+      const key = lockKey(cardKey(1));
+      await cache.cli('SET', key, 'token-A', 'PX', '5000', 'NX');
+
+      expect(await releaseLock(cache.client, key, 'token-B')).toBe(false);
+      expect(await cache.cli('GET', key)).toBe('token-A');
+      expect(await releaseLock(cache.client, key, 'token-A')).toBe(true);
+      expect(await cache.cli('EXISTS', key)).toBe('0');
+    });
+
+    it('Redis unreachable: concurrent reads all succeed at once, nobody waits for a lock', async () => {
+      const product = await aProduct().insertVia(products);
+      const dead = createCacheClient('redis://127.0.0.1:1');
+      const offline = new ProductsService(products, dead);
+      try {
+        const started = Date.now();
+        const [results, calls] = await dbCalls(() =>
+          Promise.all(Array.from({ length: 30 }, () => offline.getCard(Number(product.id)))),
+        );
+
+        expect(results.every(({ card }) => card.id === Number(product.id))).toBe(true);
+        expect(calls).toBe(30);
+        expect(Date.now() - started).toBeLessThan(1_000);
+      } finally {
+        await closeRedis(dead);
+      }
+    });
+
+    it('concurrent reads of a missing product: no waiting for the deadline', async () => {
+      const started = Date.now();
+
+      const results = await Promise.allSettled(Array.from({ length: 30 }, () => service.getCard(999_999)));
+
+      expect(results.every((result) => result.status === 'rejected')).toBe(true);
+      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(await cache.cli('EXISTS', lockKey(cardKey(999_999)))).toBe('0');
+    });
   });
 });
