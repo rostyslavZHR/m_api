@@ -7,6 +7,7 @@ import { HealthCheckModule } from './health-check/health-check.module.js';
 import { DbModule } from './db/db.module.js';
 import { RealtimeModule } from './realtime/realtime.module.js';
 import { RedisModule } from './redis/redis.module.js';
+import { SessionsModule } from './sessions/sessions.module.js';
 
 @Module({
   imports: [
@@ -19,6 +20,7 @@ import { RedisModule } from './redis/redis.module.js';
     HealthCheckModule,
     DbModule,
     RedisModule,
+    SessionsModule,
     RealtimeModule,
   ],
 })

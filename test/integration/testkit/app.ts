@@ -9,7 +9,10 @@ import type { TestDatabase } from './postgres.js';
 
 // The real AppModule with no overrides and the same setup as main.ts, on the
 // test container. Shared by the E2E tests and the Pact provider verification.
-export async function createTestApp(db: TestDatabase): Promise<NestExpressApplication> {
+// env: overrides for this test file, e.g. REDIS_QUEUE_URL pointing at a Redis
+// Testcontainer. Applied before the first import of AppModule, which reads the
+// environment once per test file: every app in a file gets the same values.
+export async function createTestApp(db: TestDatabase, env: Record<string, string> = {}): Promise<NestExpressApplication> {
   // The app reads its password from a file, not DB_URL. Give it the container's,
   // so the tests don't depend on a secrets/db_password a fresh clone lacks.
   const passwordFile = path.join(await mkdtemp(path.join(tmpdir(), 'm-api-test-')), 'db_password');
@@ -26,6 +29,7 @@ export async function createTestApp(db: TestDatabase): Promise<NestExpressApplic
   // The same for Redis, until a suite needs it.
   process.env.REDIS_CACHE_URL = 'redis://127.0.0.1:1';
   process.env.REDIS_QUEUE_URL = 'redis://127.0.0.1:1';
+  Object.assign(process.env, env);
   const { AppModule } = await import('../../../src/app.module.js');
 
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();

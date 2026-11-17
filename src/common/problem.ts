@@ -27,6 +27,12 @@ function problemInfo(status: number): { type: string; title: string } {
   if (status === 409) {
     return { type: 'https://example.com/problems/conflict', title: 'Conflict' };
   }
+  if (status === 401) {
+    return { type: 'https://example.com/problems/unauthorized', title: 'Unauthorized' };
+  }
+  if (status === 503) {
+    return { type: 'https://example.com/problems/unavailable', title: 'Service Unavailable' };
+  }
   if (status >= 400 && status < 500) {
     return {
       type: 'https://example.com/problems/validation-error',

@@ -26,6 +26,25 @@ export const createCacheClient = (url: string): Redis =>
 export const createQueueClient = (url: string): Redis =>
   named(new Redis(url, { connectionName: 'm_api:queue' }), 'queue');
 
+// Sessions live on the queue instance (noeviction, AOF) but get their own client:
+// a session is read on every request that carries the cookie, so it must not hang
+// while Redis is down. Fail fast like the cache, with a little more time (a
+// session read is not optional the way a cache read is): the request gets a 503,
+// never a 401, so a Redis blip doesn't look like a logout.
+export const SESSION_COMMAND_TIMEOUT_MS = 500;
+
+export const createSessionClient = (url: string): Redis =>
+  named(
+    new Redis(url, {
+      commandTimeout: SESSION_COMMAND_TIMEOUT_MS,
+      enableOfflineQueue: false,
+      maxRetriesPerRequest: 0,
+      connectTimeout: 1_000,
+      connectionName: 'm_api:sessions',
+    }),
+    'sessions',
+  );
+
 // Without a listener ioredis prints every reconnect error as "Unhandled error
 // event"; one line per distinct error is enough.
 function named(client: Redis, name: string): Redis {
