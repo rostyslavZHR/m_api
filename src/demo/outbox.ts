@@ -4,13 +4,8 @@
 // once, one invoice, one processed_messages row.
 //
 // requests=2 orders=1 outbox=1 published=1 deliveries=1 effect=1 processed=1
-import 'reflect-metadata';
 import { randomUUID } from 'node:crypto';
-import type { AddressInfo } from 'node:net';
-import { NestFactory } from '@nestjs/core';
-import type { NestExpressApplication } from '@nestjs/platform-express';
-import { AppModule } from '../app.module.js';
-import { appOptions, configureApp } from '../app.setup.js';
+import { startApi } from './api.js';
 import {
   checker,
   linesOf,
@@ -41,23 +36,14 @@ await runDemo('demo:outbox', async (onCleanup) => {
     throw new Error('the consumer did not start (see its log above)');
   }
 
-  // The API, in this process: errors only, on stderr.
-  const app = configureApp(
-    await NestFactory.create<NestExpressApplication>(AppModule, {
-      ...appOptions,
-      logger: ['error'],
-      abortOnError: false,
-    }),
-  );
-  onCleanup(() => app.close());
-  await app.listen(0, '127.0.0.1');
-  const { port } = app.getHttpServer().address() as AddressInfo;
+  // The API, in this process.
+  const { url } = await startApi(onCleanup);
 
   // The same key twice, as a client retrying after a lost response would.
   const key = randomUUID();
   const responses: { status: number; id: unknown; replayed: string | null }[] = [];
   for (let i = 0; i < REQUESTS; i++) {
-    const response = await fetch(`http://127.0.0.1:${port}/orders`, {
+    const response = await fetch(`${url}/orders`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key },
       body: JSON.stringify({

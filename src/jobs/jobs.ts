@@ -36,9 +36,13 @@ export const JOB_OPTIONS = {
 export const invoiceEmailJobId = (orderId: number) => `${INVOICE_EMAIL}-${orderId}`;
 
 // connection: a createQueueClient() client (fails fast). BullMQ uses it as is and
-// doesn't close it: its owner does.
-export function createJobsQueue(connection: Redis, defaultJobOptions: JobsOptions = JOB_OPTIONS): Queue {
-  const queue = new Queue(JOBS_QUEUE, { connection, defaultJobOptions });
+// doesn't close it: its owner does. The name and options are overridden only by
+// tests and the demo (a queue of their own, fast retries).
+export function createJobsQueue(
+  connection: Redis,
+  { name = JOBS_QUEUE, defaultJobOptions = JOB_OPTIONS }: { name?: string; defaultJobOptions?: JobsOptions } = {},
+): Queue {
+  const queue = new Queue(name, { connection, defaultJobOptions });
   // Without a listener an 'error' event would be unhandled.
   queue.on('error', (error) => console.error(`[jobs] queue error: ${error.message}`));
   return queue;

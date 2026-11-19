@@ -51,7 +51,7 @@ describe('Jobs queue (BullMQ)', () => {
     [db, redis] = await Promise.all([startTestDatabase(), startTestQueue()]);
     producer = createQueueClient(redis.url);
     await new Promise((resolve) => producer.once('ready', resolve));
-    queue = createJobsQueue(producer, FAST_RETRIES);
+    queue = createJobsQueue(producer, { defaultJobOptions: FAST_RETRIES });
   });
 
   beforeEach(async () => {
