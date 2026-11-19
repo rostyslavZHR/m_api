@@ -763,7 +763,7 @@ The relay publishes, waits for the broker's confirm, and only then sets `publish
 
 - **`npm run outbox:cleanup`** ([src/cleanup-outbox.ts](src/cleanup-outbox.ts)) deletes outbox rows published more than 7 days ago. Waiting and parked rows are never deleted. Meant to run periodically (cron, like `backup.cron`); safe to run any time.
 - **At a larger volume:** partition `outbox` by `created_at` (e.g. daily) and drop old partitions instead of deleting rows: no dead tuples, no vacuum work. The partial index keeps the relay's scan as small as the backlog either way.
-- **`processed_messages`** grows by one row per event per consumer. The plan: delete rows older than any redelivery could be (e.g. 30 days). A duplicate arriving later still meets the natural key `invoices.order_id`. Not scripted yet.
+- **`npm run processed-messages:cleanup`** ([src/cleanup-processed-messages.ts](src/cleanup-processed-messages.ts)) deletes `processed_messages` rows older than 30 days, far beyond any redelivery (the relay retries within minutes, a DLQ'd message is replayed by hand within days). A duplicate arriving even later still meets the natural key `invoices.order_id` and is skipped (`order already invoiced`). Same schedule as the others.
 - **`idempotency_keys`:** `npm run idempotency:cleanup`, 24 h (see [level 3](#idempotency-key-at-the-api-edge-level-3)).
 
 ### Carried over from earlier phases
