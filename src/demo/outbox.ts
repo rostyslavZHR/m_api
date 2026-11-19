@@ -89,7 +89,8 @@ await runDemo('demo:outbox', async (onCleanup) => {
   const counts = await countRun(db, userId);
   const { deliveries } = runLines(consumer.lines, counts.eventIds);
   printResults([
-    ['requests', REQUESTS],
+    // Counted from the answers, not the loop's constant.
+    ['requests', responses.length],
     ['orders', counts.orders],
     ['outbox', counts.outbox],
     ['published', counts.published],
@@ -99,7 +100,7 @@ await runDemo('demo:outbox', async (onCleanup) => {
   ]);
 
   const { check, passed } = checker();
-  check('requests=2', true);
+  check(`requests=${responses.length}, expected ${REQUESTS}`, responses.length === REQUESTS);
   check('orders=1', counts.orders === 1);
   check('outbox=1', counts.outbox === 1);
   check('published=1', counts.published === 1);
@@ -109,7 +110,8 @@ await runDemo('demo:outbox', async (onCleanup) => {
   // Beyond the contract: both answered 201 with the same order, the second as a replay.
   check(
     'both 201, the same order, the second replayed',
-    responses.every((r) => r.status === 201) &&
+    responses.length === REQUESTS &&
+      responses.every((r) => r.status === 201) &&
       responses[0].id === responses[1].id &&
       responses[0].replayed === null &&
       responses[1].replayed === 'true',
