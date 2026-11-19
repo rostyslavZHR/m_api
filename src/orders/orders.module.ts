@@ -5,10 +5,9 @@ import { OrdersController } from './orders.controller.js';
 import { OrdersRepository } from './orders.repository.js';
 import { OrdersService } from './orders.service.js';
 import { OrderEventsModule } from '../order-events/order-events.module.js';
-import { MessagingModule } from '../messaging/messaging.module.js';
 
 @Module({
-  imports: [DbModule, OrderEventsModule, MessagingModule],
+  imports: [DbModule, OrderEventsModule],
   controllers: [OrdersController],
   providers: [
     {

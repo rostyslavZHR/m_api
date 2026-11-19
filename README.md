@@ -6,7 +6,40 @@
 
 ## Grading
 
-The DB scripts, the RabbitMQ scripts and the app normally load credentials from the local store through `scripts/with-secrets.sh`. On a fresh clone there is no store, so the values come from the environment instead (`SKIP_VAULT=1`). They're the dev-only bootstrap accounts committed in [docker-compose.yml](docker-compose.yml), not secrets. The environment takes precedence over `.env`, whose `RABBITMQ_URL` is only a placeholder.
+HW#22 (Outbox та ідемпотентність). From a fresh clone, in the repository root (where `package.json` is). Nothing needs to be running but Docker: each demo builds, applies pending migrations, sets up the RabbitMQ topology and starts its own relay and consumer (see [The demos](#the-demos)).
+
+The scripts normally load credentials from the local store through `scripts/with-secrets.sh`. A fresh clone has no store, so the values come from the environment (`SKIP_VAULT=1`). They're the dev-only bootstrap accounts committed in [docker-compose.yml](docker-compose.yml), [init.sql](init.sql) and [pgbouncer/userlist.txt](pgbouncer/userlist.txt), not secrets:
+- `DB_URL`: the app's connection, `app_user` through PgBouncer. The app ignores any password in it and reads `secrets/db_password` (gitignored), so the block creates that file.
+- `MIGRATIONS_DB_URL`: the schema owner. The demos apply migrations with it, and `demo:crash-write` creates its temporary trigger with it (`app_user` can't).
+- `RABBITMQ_URL`: the brief's `BROKER_URL`, under the name the code reads. Host port 21113 is the AMQP port (5672 in the container), not the UI's 21114.
+
+```bash
+docker compose up -d --wait
+
+export DB_URL=postgres://app_user@localhost:21111/shop
+export MIGRATIONS_DB_URL=postgres://admin:admin-bootstrap-only@localhost:21110/shop
+export RABBITMQ_URL=amqp://app:rabbitmq-dev-only@127.0.0.1:21113
+export SKIP_VAULT=1
+mkdir -p secrets && printf 'app-v1-password' > secrets/db_password
+
+npm ci
+
+npm run demo:outbox; echo "exit=$?"
+npm run demo:crash-write; echo "exit=$?"
+npm run demo:crash-relay; echo "exit=$?"
+```
+
+| Demo | stdout (exactly these lines) | Takes, with the build |
+|---|---|---|
+| `demo:outbox` | `requests=2` `orders=1` `outbox=1` `published=1` `deliveries=1` `effect=1` `processed=1` | 6–7 s |
+| `demo:crash-write` | `write-failed=1` `orders=0` `outbox=0` `published=0` `deliveries=0` `effect=0` | 6–7 s |
+| `demo:crash-relay` | `published=1` `deliveries=2` `applied=1` `effect=1` `processed=1` | ~4 s |
+
+Each npm script runs `npm run build` first (about 3 s of each time). Exit codes: `0` every check held, `1` a check failed (the lines are still printed, and stderr names the failed check), `2` setup failed (no result lines). Each demo can be rerun any number of times. Measured on a fresh clone with only the variables above, each demo twice. HW#19's `npm run demo:dlq` still passes too, after any of them has built `dist/`.
+
+### HW#15 and earlier: database, PgBouncer, backup (historical)
+
+The original setup, which the historical HW#16–19 blocks below build on. The environment takes precedence over `.env`, whose `RABBITMQ_URL` is only a placeholder.
 
 ```bash
 docker compose up -d --wait
@@ -57,9 +90,9 @@ The row counts are `11|11|60|120` after the first seed and after the second — 
 
 Optional: `DEMO_COMPARE=1 npm run demo:workers` and `DEMO_COMPARE=1 npm run demo:retry` add the contrast runs — the same work without `SKIP LOCKED`, and under `READ COMMITTED` — see [Concurrency](#concurrency).
 
-### HW#16: tests and the contract gate
+### HW#16: tests and the contract gate (historical)
 
-Needs Docker running (Testcontainers starts its own Postgres) and the setup above: `secrets/db_password` created, `docker compose up -d --wait` (it also starts the Pact broker on 21112). `PACT_BROKER_URL` is set only on the gate commands; everything before them verifies the local pact file. Run from a clean tree: the gate's version is the commit SHA.
+Needs Docker running (Testcontainers starts its own Postgres) and the [HW#15 setup](#hw15-and-earlier-database-pgbouncer-backup-historical): `secrets/db_password` created, `docker compose up -d --wait` (it also starts the Pact broker on 21112). `PACT_BROKER_URL` is set only on the gate commands; everything before them verifies the local pact file. Run from a clean tree: the gate's version is the commit SHA.
 
 ```bash
 npm ci && npx tsc --noEmit
@@ -99,9 +132,9 @@ grep -rnE "PACT_BROKER_TOKEN[\"']?[[:space:]]*[:=][[:space:]]*[\"'][^\"'$]" --in
 | Vault wrapper | `test -f scripts/with-secrets.sh && grep -q SKIP_VAULT scripts/with-secrets.sh` |
 | No literal token | the `PACT_BROKER_TOKEN` grep above → no output |
 
-### HW#18: real-time order status
+### HW#18: real-time order status (historical)
 
-Run this after the setup at the top of [Grading](#grading): DB up, `.env` and `secrets/db_password` in place, migrations applied, `npm run seed` done. Start the app in a second terminal, after running the same `export` lines there: the app needs `RABBITMQ_URL`, and fails fast at startup without a valid one. The build is `tsc`, through `nest build`; `tsx` would not work, because it doesn't emit the decorator metadata Nest's dependency injection needs:
+Run this after the [HW#15 setup](#hw15-and-earlier-database-pgbouncer-backup-historical): DB up, `.env` and `secrets/db_password` in place, migrations applied, `npm run seed` done. Start the app in a second terminal, after running the same `export` lines there: the app needs `RABBITMQ_URL`, and fails fast at startup without a valid one. The build is `tsc`, through `nest build`; `tsx` would not work, because it doesn't emit the decorator metadata Nest's dependency injection needs:
 
 ```bash
 npm run build && node dist/main.js     # listens on PORT from .env: http://localhost:3000
@@ -148,7 +181,9 @@ node scripts/realtime-demo.mjs --same-room; echo "exit=$?"   # A_RECEIVED=1  B_R
 
 The [trade-offs](#trade-offs-websocket-vs-sse) and the [known gaps](#real-time-known-gaps) are further down.
 
-### HW#19: RabbitMQ order.placed
+### HW#19 grading (historical): RabbitMQ order.placed
+
+> **Superseded in HW#22.** Since the outbox, `POST /orders` no longer publishes; a separate relay process does. `demo:publish` and `demo:duplicate` watched the publisher inside their own process, so they stopped working, and they're **removed**: `demo:outbox` and `demo:crash-relay` replace them (see [The demos](#the-demos)). `demo:dlq` still runs as described. The block below is HW#19 as graded, for the record.
 
 Self-contained: from a fresh clone, in the repository root (where `package.json` is). The API doesn't need to be running: each demo places its orders through the app's own `OrdersService` and starts the consumer itself. `npm run build` is required (the demos run from `dist/`), and so is `npm run migrate` (it creates the `invoices` table).
 
@@ -400,14 +435,16 @@ An example (ids vary per run):
 
 ### Publishing
 
+> **Replaced in HW#22.** `POST /orders` no longer publishes: checkout writes the event to the `outbox` table in the order's transaction, and the relay publishes it ([Outbox та ідемпотентність](#outbox-та-ідемпотентність-hw22-transactional-outbox-and-idempotency)). This section describes HW#19's direct publish, whose publisher the relay reuses.
+
 - **After the commit, never inside the transaction:** `OrdersService.create` publishes once `checkout()` has returned. Inside the retrying transaction callback, a rolled-back attempt would publish an order that doesn't exist. An Idempotency-Key replay doesn't publish again.
-- **Each message waits for its own broker confirm**, with a **2 s budget** that includes connecting. `POST /orders` waits up to 2 s when the broker is down or not answering. A failure is logged with `eventId` and `orderId`, the order is still `201`, and the loss is **counted**: `GET /health` returns `orderPlacedUnpublished`, the number of events this process failed to publish since it started (the log has each one's ids).
+- **Each message waits for its own broker confirm**, with a **2 s budget** that includes connecting. `POST /orders` waits up to 2 s when the broker is down or not answering. A failure was logged with `eventId` and `orderId`, and the order was still `201`. Until the outbox, `GET /health` also counted those losses (`orderPlacedUnpublished`); that counter is gone with the direct publish, since the order path can no longer lose an event.
 - **`mandatory: true`** plus a `'return'` listener catches a message nothing takes. With the AE in place, an unknown key lands in `shop.unrouted` instead.
 - **One connection and one confirm channel, opened lazily.** The API boots without a broker. A broken connection is dropped and reopened on the next publish.
 
 ### The consumer
 
-`npm run consumer` (after `npm run build` and `npm run rabbitmq:bootstrap`) runs [src/consumer/main.ts](src/consumer/main.ts) as its own process, with its own DB pool and AMQP connection. For each `order.placed` it writes one row to `invoices`, with `INSERT … ON CONFLICT (event_id) DO NOTHING`, and then acks. A redelivered event inserts nothing and is acked as `skipped`.
+`npm run consumer` (after `npm run build` and `npm run rabbitmq:bootstrap`) runs [src/consumer/main.ts](src/consumer/main.ts) as its own process, with its own DB pool and AMQP connection. For each `order.placed` it writes one row to `invoices` and then acks; a redelivered event inserts nothing and is acked as `skipped`. (HW#19 deduplicated with `ON CONFLICT (event_id)`; since HW#22 it uses `processed_messages` plus a unique `order_id`, see [The idempotent consumer](#the-idempotent-consumer).)
 
 - **Prefetch 10 × under 1 s per message ≪ the 30-minute `consumer_timeout`.** Each delivery is one `INSERT` plus an ack. 10 also matches the consumer's DB pool of 10, so no handler waits for a connection.
 - **Poison goes to the DLQ at once** (`reject` without requeue): a body that isn't JSON, a payload that doesn't parse as `order.placed` v1, or a Postgres data or integrity error (class 22 or 23, e.g. an `orderId` that doesn't exist).
@@ -426,13 +463,15 @@ RabbitMQ can't promise exactly-once, because each hand-off can fail after the re
 
 So a message can arrive more than once, and the effect has to tolerate that. Two things make the result one invoice:
 1. a **stable `eventId`** (the creation row, the same on every publish and redelivery);
-2. **`INSERT … ON CONFLICT (event_id) DO NOTHING`** on a unique `event_id`.
+2. **`INSERT … ON CONFLICT (event_id) DO NOTHING`** on a unique `event_id` (HW#19; replaced in HW#22 by two levels, see [The idempotent consumer](#the-idempotent-consumer)).
 
-Idempotency is a property of the operation: doing it twice leaves the same state as doing it once. An idempotency key is the tool that gives an operation that property, and here the key is `event_id`.
+Idempotency is a property of the operation: doing it twice leaves the same state as doing it once. An idempotency key is the tool that gives an operation that property, and here the key is `event_id` (since HW#22, the outbox uuid in `processed_messages`).
 
 **How the duplicate is produced:** `demo:duplicate` runs the consumer as a separate process. The consumer kills itself with SIGKILL after the invoice commits and before the ack, which is a real crash at the worst moment. A second consumer then gets the redelivery (`redelivered: true`) and skips it. `channel.close()` or a SIGTERM wouldn't prove anything: those are polite shutdowns, and they would finish and ack, or hand the message back through a different code path, rather than lose the ack the way a crash does.
 
 ### Demo results
+
+> HW#19's results, before the outbox. `demo:publish` and `demo:duplicate` were removed in HW#22 (see above); the record below is how they ran then.
 
 One run of each, from this repository:
 
@@ -468,7 +507,7 @@ Timings are approximate wall clock, including npm; they vary with the machine an
 
 The three demos:
 - **`demo:publish`:** places 5 orders, so 5 events, confirmed by the broker. Then it starts the consumer, waits for 5 acks, stops it, and measures: the invoices from the DB, the queue depths from the broker. `prefetch` is the value the consumer reported after setting it.
-- **`demo:dlq`:** publishes one `order.placed` with `version: 2`, which the consumer doesn't know, and waits for the reject. Then it reads `x-first-death-reason` from the DLQ's head without removing it: `get`, read the headers, `nack` with requeue. Not `reject`: the DLQ has no policy, so it has quorum's default delivery limit of 20 and no DLX, and only `reject` counts toward that limit.
+- **`demo:dlq`:** publishes one `order.placed` that the consumer can't read (since HW#22, an old version 1 message; in HW#19 it was a `version: 2`), and waits for the reject. Then it reads `x-first-death-reason` from the DLQ's head without removing it: `get`, read the headers, `nack` with requeue. Not `reject`: the DLQ has no policy, so it has quorum's default delivery limit of 20 and no DLX, and only `reject` counts toward that limit.
 - **`demo:duplicate`:** places 1 order and runs the crash described above. It also checks that the child really exited by SIGKILL.
 
 **Measuring depth.** Depths are read with `checkQueue` after the consumer has stopped, because it counts ready messages only and nothing may be unacked. They're polled until they hold for 1 s, since dead-lettering is asynchronous. There's a 60 s overall deadline, and leftover consumer processes are killed on any exit.
@@ -493,7 +532,7 @@ These were measured by breaking the code on purpose. In three of the five delibe
 
 ### Known gaps and limits
 
-- **No outbox.** `POST /orders` publishes after the commit and waits up to 2 s; if the broker is down, the order is `201` and the event is lost; the log line and the `/health` counter (`orderPlacedUnpublished`, per process, reset on restart) make the loss visible but don't recover it (closed by HW#22's transactional outbox).
+- **No outbox (HW#19 only, closed in HW#22).** HW#19 published after the commit, so a broker outage at that moment lost the event. HW#22 writes it to the outbox in the order's transaction instead.
 - **The mark and the effect.** The consumer's dedup mark and its effect are the same `invoices` row, written in one statement, so they can't diverge. That stops being true as soon as the effect leaves this database (an email, another service), which is what HW#22's `processed_messages` generalises.
 - **The retry delay lives in the consumer, not the broker.** A message waiting to be retried holds a prefetch slot, a DB outage longer than about a minute still dead-letters it, and a consumer restart starts the wait over; a broker-side delay (a TTL wait queue that dead-letters back into the work queue) would free the slot and survive restarts.
 - **`reject`, never `nack`.** On 4.3 quorum queues only `reject` with requeue counts toward `delivery-limit`, so the consumer never uses `nack`, which would loop forever. The DLQ peek is the one deliberate `nack`, as explained above.
@@ -505,6 +544,234 @@ These were measured by breaking the code on purpose. In three of the five delibe
 
 - **Run `npm run rabbitmq:bootstrap` before starting the consumer.** The consumer declares exchanges and queues, but AMQP can't set policies. Without them, `shop.invoicing` has no dead-letter exchange, only quorum's built-in delivery limit of 20, so a poison message is **dropped** after 20 attempts instead of being parked in `shop.dlq`. It's safe to re-run.
 - **`shop.unrouted` should stay empty.** A non-zero depth means a publisher sends a routing key nothing is bound to. Check it with `docker compose exec -T rabbitmq rabbitmqctl -q list_queues name messages`, or in the UI at http://localhost:21114.
+
+## Outbox та ідемпотентність (HW#22: transactional outbox and idempotency)
+
+HW#19 publishes `order.placed` after the commit, so an event is lost if the broker is down at that moment. The outbox closes that gap: the event is written to the `outbox` table in the same transaction as the order, and a relay publishes it later. The consumer side records what it has processed in `processed_messages`.
+
+### Schema
+
+- **`outbox`:** `id` uuid (the event id), `aggregate_type`, `aggregate_id`, `type`, `payload` jsonb, `created_at` and `published_at` (both `timestamptz`), `attempts`. `published_at IS NULL` means the event hasn't been sent yet. There's no foreign key to `orders`, because the outbox logs events for any kind of aggregate.
+- **`outbox_unpublished_idx`:** a partial index on `(created_at, id) WHERE published_at IS NULL`. Its columns are the relay's `ORDER BY` and its condition is the relay's `WHERE`, so published rows drop out and the index stays as small as the backlog. `EXPLAIN` of the relay's query shows `Index Scan using outbox_unpublished_idx`, with no sort.
+- **`processed_messages`:** primary key `(message_id, consumer)`, plus `processed_at`. `message_id` is the outbox id. Several consumers can each process the same event once, and a duplicate for the same consumer fails with `23505`.
+- Both tables come from one migration ([src/migrations/1794769025351-AddOutbox.ts](src/migrations/1794769025351-AddOutbox.ts)), whose `down` drops both tables and the index.
+
+### Decisions
+
+- **snake_case column names**, like the rest of the schema. Debezium's [Outbox Event Router](https://debezium.io/documentation/reference/stable/transformations/outbox-event-router.html#outbox-event-router-configuration-options) expects `aggregatetype` and `aggregateid` by default, so a later move to CDC would set `route.by.field=aggregate_type` and `table.field.event.key=aggregate_id`. `id` and `payload` already match its defaults.
+- **The outbox id is a uuid, generated in code before the insert.** The code knows it up front, it becomes the event id consumers deduplicate by, and it reveals nothing about how many orders exist.
+- **The broker URL stays `RABBITMQ_URL`**, as stored since HW#19 in the secrets store and read through `scripts/with-secrets.sh`. It's the brief's `BROKER_URL`; one name avoids two copies of the same secret.
+
+### Writing the event: one commit with the order
+
+- **Same transaction.** `checkout()` (HW#14's transaction) inserts the order, its items, the stock and balance changes, the creation row, the receipt job and now the outbox row, then commits once. So an event exists if and only if its order does. Nothing in the transaction talks to the broker, which can't roll back.
+- **Through the transaction's manager.** `OutboxRepository` takes an `EntityManager` (like `OrdersRepository`), built on the callback's `manager`. Using an injected repository, or `dataSource.manager`, would take its own pooled connection and commit separately: the dual write again, inside one database. That failure was measured: with a throw after the insert, the order rolled back and the outbox row survived, an event for an order that doesn't exist.
+- **The payload is built from the saved order** (`toOrderPlacedEvent(order, eventId)`): the id, the total and the prices as charged, not the request's input.
+- **The relay is the only publisher.** HW#19's post-commit publish is gone from `POST /orders`; two paths would send every event twice. Between this phase and the relay, nothing reaches RabbitMQ, and the events wait in `outbox` (`published_at IS NULL`).
+
+### The order.placed v2 contract
+
+The same fields and names as v1, except **`eventId` is the outbox row's uuid** (v1: the order's first event row id, digits), so the version is **2**:
+
+```json
+{
+  "eventId": "61dbc6ab-8e84-46d6-afc9-ac20676ddd0b",
+  "type": "order.placed",
+  "version": 2,
+  "occurredAt": "2026-11-15T19:23:23.812Z",
+  "data": {
+    "orderId": 406, "userId": 3, "totalCents": "189900",
+    "items": [{ "productId": 8, "quantity": 1, "unitPriceCents": "189900" }]
+  }
+}
+```
+
+- **The names stay v1's**, since renaming a published field is a breaking change. Money is still integer cents in a string, and there's still no currency.
+- **`type` is `order.placed`** everywhere: the payload's `type`, the outbox row's `type` and the routing key. So the relay publishes with the row's `type` as the key, and nothing translates names.
+- **The outbox row:** `id = eventId`, `aggregate_type = 'order'`, `aggregate_id` = the order's id.
+- **How the version works:** it's an ordinary field in the message body, not a RabbitMQ or ORM feature. The producer writes `version: 2`; the consumer's zod schema accepts only `z.literal(2)`, so a message of a version it doesn't know is rejected clearly (to the DLQ) instead of being misread.
+- **The v1 → v2 transition:** the consumer's reader accepts **v2 only**, and a v1 message is poison (`demo:dlq` uses one). Dev has no v1 backlog, so purging the queue is enough. **In production, you'd deploy the reader that accepts both versions first** (e.g. `z.discriminatedUnion('version', [v1, v2])`), **and only then switch the producer to v2**, so no message in flight is ever unreadable.
+
+### The relay
+
+`npm run relay` (after `npm run build`; through `scripts/with-secrets.sh`) runs [src/relay/main.ts](src/relay/main.ts): a separate process, so it can be killed without touching the API. It's a **polling relay**: it reads committed outbox rows and publishes them with HW#19's publisher. The logic is in [src/relay/relay.ts](src/relay/relay.ts).
+
+**One batch, one transaction, on one connection:**
+1. `SELECT … FROM outbox WHERE published_at IS NULL AND attempts < 10 ORDER BY created_at, id LIMIT 50 FOR UPDATE SKIP LOCKED`. The rows are locked, and rows another relay holds are skipped, so two relays never take the same row.
+2. Publish each row to `shop.events`: routing key = `row.type` (`order.placed`), `messageId` = `row.id`, body = `row.payload`, `persistent`, `mandatory`. Each one waits for its own broker confirm, at most 2 s.
+3. `UPDATE … SET published_at = now()` for the confirmed rows, and `attempts = attempts + 1` for the rest.
+4. `COMMIT`, both updates together. A failed publish isn't an exception, so its attempt is committed, not rolled back.
+
+**Pacing:**
+- a full batch → the next one at once;
+- an empty or partial batch → sleep 500 ms;
+- a failure → back off exponentially with jitter (0.5 s doubling to a 30 s cap; each wait is between half and all of that), so it never spins.
+
+Before taking any locks, the relay checks that the broker is reachable. During an outage it only waits: no rows are locked, and no attempts are spent.
+
+- **Parked rows:** a row that failed 10 times (the broker reachable, but no confirm) is skipped from then on and logged `PARKED: …`. It needs a person, who can reset its `attempts`.
+- **The backlog signal:** every 10 s the relay logs `backlog: pending=<n> oldest=<s>s parked=<n>`. It replaces HW#19's `/health` counter.
+- **SIGTERM** finishes the current batch, then closes the broker connection and the DB.
+- **Ordering:** see [Ordering](#ordering) below.
+- **Unroutable messages:** a confirm only means "the broker took it". A row whose `type` matches no binding goes to `shop.unrouted` through HW#19's alternate exchange, is confirmed, and is marked published, so `shop.unrouted` must stay empty.
+
+**Why mark only after the confirm, never before:** see [Why publish and `UPDATE published_at` can't be swapped](#why-publish-and-update-published_at-cant-be-swapped).
+
+**Measured:**
+
+| Check | Result |
+|---|---|
+| First start, 7 waiting rows | `published 7 of 7`; `shop.invoicing` 0 → 7, each `message_id` = its outbox id = `payload.eventId` |
+| A new order | published 38 ms after it was created |
+| Two relays, 200 rows | each relay 100 rows (2 batches of 50); the queue +200, 0 duplicate ids |
+| Broker stopped, 3 orders | the rows stay waiting with `attempts` 0; waits of 0.3 → 0.9 → 1.1 → 3.6 → 4.4 → 8.6 → 24.8 s; drained by the first attempt after the broker came back (~23 s later, the backoff) |
+| No `SKIP LOCKED`, two relays, 100 rows | the queue +200: 100 duplicates |
+
+### The idempotent consumer
+
+The relay is at-least-once, so the consumer gets duplicates: a re-publish after a relay crash, a redelivery after a consumer crash, a replayed row. Every event must still produce **at most one invoice**. [src/consumer/invoices.ts](src/consumer/invoices.ts) handles each message in **one transaction**, with two levels of protection:
+
+1. **The inbox (`processed_messages`):** `INSERT (eventId, 'invoicing') … ON CONFLICT (message_id, consumer) DO NOTHING RETURNING`. If no row comes back, this consumer already processed this event: commit, ack, and log it as `skipped` (`duplicate`).
+2. **The natural key (`invoices.order_id`, unique):** `INSERT INTO invoices … ON CONFLICT (order_id) DO NOTHING`. A *different* event for an order that already has an invoice is recorded as processed and skipped (`order already invoiced`).
+
+Then **commit, then ack**. Acking before the commit would lose the effect for good if the process died in between.
+
+- **Why both levels:** the natural key protects the effect even after old inbox rows are cleaned up, or when another event arrives for the same order. The inbox gives exact "skipped" counts, and it works for effects that have no natural key.
+- **The rules behind it:**
+  - **One transaction for the mark and the effect.** Two transactions would be a dual write again: a crash between them leaves "processed, no invoice", lost for good, because the redelivery is skipped. This was measured.
+  - **The unique constraints are the check, never "SELECT, then insert".** Two concurrent copies would both see "not there yet" and both insert.
+  - **`ON CONFLICT` always names its target** (`(order_id)`, `(message_id, consumer)`), so any *other* unique violation still raises an error instead of being swallowed.
+- **The error policy (unchanged from HW#19):** an invalid message (not JSON, not v2, a data or integrity error) is rejected without requeue and goes to the DLQ. A database outage is rejected **with** requeue after a growing pause, bounded by `delivery-limit` 5, so RabbitMQ redelivers it. The consumer uses `reject`, never `nack`: on quorum queues only `reject` counts toward the limit.
+- **Counting:** the consumer prints `applied` and `skipped` lines on stdout, and `skipped` carries the reason.
+
+**Measured** (consumer and relay running):
+
+| Check | Result |
+|---|---|
+| Replaying every outbox row (327) | 327 applied, 4 skipped (`duplicate`: 4 messages that were already in the queue); invoices +327, processed +327 |
+| One new order | 1 invoice and 1 `processed_messages` row |
+| Replaying its event (`UPDATE outbox SET published_at = NULL …`) | `skipped: duplicate`; counts unchanged |
+| Two consumers, 50 replayed events | skipped 27 + 23 = 50; no new rows |
+| Mark and invoice in two transactions, crash between (deliberate) | `processed=1, invoices=0`, and the redelivery was skipped: lost |
+| Throw after the invoice insert, inside the transaction | 0 invoices, 0 processed; redelivered with growing pauses; applied once after the fix |
+| The same event twice at once | 1 applied, 1 `skipped: duplicate`; 1 invoice, 1 processed row |
+
+**The invoices migration** ([1794780921326-InvoicesPerOrder](src/migrations/1794780921326-InvoicesPerOrder.ts)) drops `event_id` and its unique constraint, and adds `invoices_order_id_key UNIQUE (order_id)`. It fails if an order already has two invoices, so check first with `SELECT order_id, count(*) FROM invoices GROUP BY order_id HAVING count(*) > 1`.
+
+### Idempotency-Key at the API edge (level 3)
+
+A client that gets no answer to `POST /orders` (a timeout, a dropped connection) retries it, and without protection a retry is a second order and a second charge. `Idempotency-Key` (required, a uuid, as since HW#9) makes the retry safe. It's level 3 of the three idempotency levels, at the front door; levels 1 and 2 are the consumer's (above).
+
+**The `idempotency_keys` table:** primary key `(user_id, key)`, `fingerprint`, `order_id`, `created_at`. It replaces the in-memory `Map` in `OrdersService`, which a restart or a second instance didn't see.
+
+**How it works:** [`checkoutWithKey()`](src/checkout/checkout.ts) runs inside checkout's one transaction:
+1. **First statement:** `INSERT INTO idempotency_keys … ON CONFLICT (user_id, key) DO NOTHING RETURNING`.
+2. **A row comes back:** this request owns the key. It creates the order, then stores the order's id on the key row. The key, the order, its outbox row and everything else commit **together**.
+3. **No row comes back:** the key was already used, so nothing is created. The stored order is returned with `201` and an `Idempotent-Replayed: true` header.
+
+**Concurrency comes for free.** A second request with the same key waits on the first one's index entry until it commits (then it's a replay), or until it rolls back (then it takes the key over). There's no "in progress" state, because it's all one transaction.
+
+- **The same key with a different body → `422`.** The fingerprint is a sha256 of the canonical body, with fixed field order and items sorted. It only detects misuse; it's never the key. Using the body's hash as the key would merge two identical orders placed on purpose (measured: two keys, one order).
+- **Keys are per user:** the same key from two users is two keys, two orders. User B can't receive user A's order. Here the user is the body's `user_id`, since the API has no auth, so the scoping is only as strong as that field; in a real app the user comes from the auth token, never from the body.
+- **Deleting an order deletes its key** (`ON DELETE CASCADE`), so a retry after that would create a new order. That's a deliberate choice: orders are never deleted in practice, and a key pointing at nothing would be useless.
+- **What a replay returns:** the same order, with `201`. Its `status` is the order's current one: the response is read again, not stored.
+- **A failed checkout** (out of stock, insufficient funds) rolls the key back with everything else. Only a created order is remembered, and a retry with the same key tries again.
+- **Cleanup:** keys expire after 24 h. `npm run idempotency:cleanup` deletes the older ones, meant to run periodically (cron, like `backup.cron`). A retry after that creates a new order.
+
+**Measured** (the API, relay and consumer running): each case ends with **1 order, 1 outbox row, 1 invoice**:
+
+| Case | Result |
+|---|---|
+| The same key twice in a row | both `201`, the same order id; the second with `Idempotent-Replayed: true` |
+| The same key twice at the same moment | both `201`, the same order id, exactly one marked replayed |
+| A request, an API restart, the same request | the same order id, replayed (the old `Map` gave a second order here) |
+| The same key, a different body | `422`, no new order |
+| The same key, two users | two orders, one each |
+
+**And with the protection broken on purpose:**
+
+| Broken on purpose | Result |
+|---|---|
+| The old in-memory `Map`, restart between requests | 2 orders for one key |
+| The key checked outside the transaction (300 ms sleep), concurrent requests | 2 orders for one key (both passed the check); the key row points at one of them |
+| The body's hash as the key, two keys with the same body | 1 order where there should be 2 |
+
+### The demos
+
+Each demo starts from nothing but `docker compose up -d --wait`:
+- its npm script **builds first**, so no `dist/` is needed;
+- it applies **pending migrations** itself, as the schema owner;
+- it runs the **RabbitMQ bootstrap** (policies, exchanges, queues) and purges the queues.
+
+It then creates a **fresh user and product**, and every count is scoped to that user. The dev data, the seed, earlier runs and old outbox rows published meanwhile don't change the numbers, so each demo can be run any number of times. The relay and the consumer run as **child processes** (the real `dist/relay/main.js` and `dist/consumer/main.js`) and are killed at the end whatever happens. stdout carries only the `key=value` lines; logs go to stderr. Exit codes: `0` all checks held, `1` a check failed (lines still printed), `2` setup failed.
+
+```
+$ npm run demo:outbox          # 6–7 s with the build, exit=0
+requests=2
+orders=1
+outbox=1
+published=1
+deliveries=1
+effect=1
+processed=1
+
+$ npm run demo:crash-write     # 6–7 s with the build, exit=0
+write-failed=1
+orders=0
+outbox=0
+published=0
+deliveries=0
+effect=0
+
+$ npm run demo:crash-relay     # ~4 s with the build, exit=0
+published=1
+deliveries=2
+applied=1
+effect=1
+processed=1
+```
+
+- **`demo:outbox`: the whole chain, with a client retry.** The real API runs in the demo's process (on a random port) and gets two `POST /orders` with the same `Idempotency-Key`. That gives one order (the second request is answered with the same order and `Idempotent-Replayed: true`), one outbox row, published once, delivered once, one invoice and one `processed_messages` row.
+- **`demo:crash-write`: the order and its event commit together, or neither does.** Placing the order (the API's path, `checkoutWithKey`) fails **after** its outbox row was inserted, inside the transaction. With the relay and the consumer running for 3 s (six poll intervals), nothing comes out the other end.
+  - **The failure mechanism:** a temporary trigger on the transaction's last statement (`UPDATE idempotency_keys`, after the outbox insert). It's created with the schema owner's credentials (`app_user` can't create triggers), limited to the run's user by a `WHEN` clause, and dropped afterwards. There's no hook in the application code.
+  - **Why that statement:** the trigger isn't on the outbox insert itself, because failing that statement also fails an outbox insert that escaped the transaction, and the demo couldn't catch that trap.
+- **`demo:crash-relay`: at-least-once delivery, exactly one effect.** The relay dies **by SIGKILL after the broker confirmed the event and before it marked the row published**. A fresh relay publishes the same event again, and the consumer gets it twice, applies it once and skips it once (`duplicate`). **The kill mechanism:** a real `kill -9` at an exact point: the relay child runs with the demo-only `RELAY_CRASH_AFTER_CONFIRM=1`, and its `afterConfirms` hook SIGKILLs it there. The demo checks the exit signal, and that the row was still waiting after the crash.
+  - **`RELAY_CRASH_AFTER_CONFIRM` exists only for `demo:crash-relay`.** The relay honours it only together with `DEMO_RUN=1`, and never under `NODE_ENV=production`; otherwise it logs that the switch was ignored.
+
+**Each demo catches its broken counterpart** (measured, each restored afterwards):
+
+| Broken on purpose | Demo | Result |
+|---|---|---|
+| A non-idempotent consumer (no inbox, no `ON CONFLICT`, the unique `order_id` dropped) | `demo:crash-relay` | `applied=2 effect=2 processed=0`, exit 1 |
+| The outbox insert outside the transaction (the DataSource's own manager) | `demo:crash-write` | `outbox=1 published=1 deliveries=1`: an event for an order that doesn't exist, exit 1 |
+| The relay marks (and commits) first, publishes after | `demo:crash-relay` | `deliveries=1`: the restarted relay sees the row as published and sends nothing, exit 1 |
+
+### Why publish and `UPDATE published_at` can't be swapped
+
+The relay publishes, waits for the broker's confirm, and only then sets `published_at`. Swapped, a duplicate becomes a loss:
+- **Mark first, publish second:** once the mark commits, any crash or failed publish loses the event. The row says "sent", the relay never looks at it again, and nothing will ever send it. Measured twice: a failing publisher left a marked row whose message was nowhere (not in `shop.invoicing`, the DLQ or `shop.unrouted`); and `demo:crash-relay` with the swap gave `deliveries=1`, because the restarted relay saw the row as sent.
+- **Publish first, mark second:** the same crash, between the confirm and the UPDATE, leaves the row waiting, so it's published again. That's a duplicate, and the idempotent consumer absorbs it: `demo:crash-relay` gives `deliveries=2`, `effect=1`.
+- **A publish error doesn't even mean "not delivered".** A confirm timeout or a dropped connection can come after the broker already stored the message. So no order of the two steps gives exactly-once: the choice is between a possible duplicate and a possible loss, and only a duplicate can be undone (consumers deduplicate by `eventId`). Hence at-least-once delivery plus idempotent consumers.
+
+### Ordering
+
+- One relay publishes in `created_at, id` order, but **`ORDER BY` is the order rows are selected, not the order they're delivered.** With several relays (`SKIP LOCKED` gives each its own rows), after a publish that fails and is retried in a later batch, or with the consumer handling up to 10 messages at once (its prefetch), a later event can be processed first.
+- **Here it doesn't matter:** each order has one event, `order.placed`, and invoices for different orders are independent.
+- **If per-order sequence mattered** (say `order.placed` → `order.paid` → `order.cancelled`): each event would carry a per-order sequence number written in the same transaction (e.g. a `version` column on `orders`), and the consumer would apply only `last + 1`. It would skip `≤ last` as a duplicate, and requeue or park anything further ahead. Routing by `aggregate_id` to one consumer (a consistent-hash exchange, or a single-active-consumer queue) would keep most events in order, but only the sequence check guarantees it.
+
+### Cleanup
+
+- **`npm run outbox:cleanup`** ([src/cleanup-outbox.ts](src/cleanup-outbox.ts)) deletes outbox rows published more than 7 days ago. Waiting and parked rows are never deleted. Meant to run periodically (cron, like `backup.cron`); safe to run any time.
+- **At a larger volume:** partition `outbox` by `created_at` (e.g. daily) and drop old partitions instead of deleting rows: no dead tuples, no vacuum work. The partial index keeps the relay's scan as small as the backlog either way.
+- **`processed_messages`** grows by one row per event per consumer. The plan: delete rows older than any redelivery could be (e.g. 30 days). A duplicate arriving later still meets the natural key `invoices.order_id`. Not scripted yet.
+- **`idempotency_keys`:** `npm run idempotency:cleanup`, 24 h (see [level 3](#idempotency-key-at-the-api-edge-level-3)).
+
+### Carried over from earlier phases
+
+- **`RABBITMQ_URL` is the brief's `BROKER_URL`:** one name for one secret, as stored since HW#19 (see Decisions, above).
+- **Debezium's column names:** the outbox uses snake_case (`aggregate_type`, `aggregate_id`); a move to CDC would set `route.by.field=aggregate_type` and `table.field.event.key=aggregate_id`.
+- **`user_id` comes from the request body,** since the API has no auth. In a real app it comes from the auth token, and so does the Idempotency-Key's scope.
+- **The `order.placed` v1 → v2 transition:** in dev the queue was purged; in production, deploy the reader that accepts both versions first, then switch the producer to v2.
 
 ## Database: schema, seed, indexes
 
@@ -768,7 +1035,7 @@ CI uses environments (`record-deployment`, `--to-environment`) rather than the t
 
 ### Known gaps
 
-- **Idempotency-Key replays are kept in memory:** per process, lost on restart, and two simultaneous requests with the same key can both create an order. A table with a unique key on the idempotency key is the durable version.
+- **Idempotency-Key replays (closed in HW#22):** until HW#22 they were kept in memory, so they were lost on restart, and two simultaneous requests with the same key could both create an order. They're now the `idempotency_keys` table, claimed inside the checkout transaction; see [Idempotency-Key at the API edge](#idempotency-key-at-the-api-edge-level-3).
 - **`app-v1-password` lives in two places:** `init.sql` (the testkit reads it from there and hands it to the test app through `DB_PASSWORD_FILE`) and the Grading setup's `secrets/db_password` for running the app itself.
 - **The provider version is the commit SHA,** which only identifies the code on a clean tree: uncommitted changes get verified and published under `HEAD`'s SHA.
 - **No persistent broker is configured yet:** until `PACT_BROKER_URL`/`PACT_BROKER_TOKEN` secrets point at one (PactFlow, or a self-hosted broker), CI checks only this commit's consumer/provider pair, not the consumer against what is actually in production.
@@ -880,7 +1147,7 @@ The multi-stage [Dockerfile](Dockerfile) only copies `dist/`, `package*.json`, `
 | `src/common/` | shared `problem+json` builder and the global exception filter |
 | `src/config/env.schema.ts` | zod schema for all env vars, fail-fast `validate()` |
 | `src/db/` | `DbModule`/`DbService`/`DbController` — the app's DataSource (`app-data-source.ts`), `/db` health query |
-| `src/health-check/` | `/health` module (`{ uptimeSec, orderPlacedUnpublished }`) |
+| `src/health-check/` | dependency-free `/health` module (`{ uptimeSec }`) |
 | `src/order-events/` | `OrderEventsBus` (the in-process Subject for committed status changes) and the `OrderStatusEvent` payload both transports send, see [Real-time order status](#real-time-order-status-hw18) |
 | `src/realtime/` | `OrdersGateway`: the Socket.IO `/orders` namespace, handshake identity, `join` with the ownership check, bus → rooms |
 | `src/entities/` | TypeORM entities for the HW#12 schema; `index.ts` exports them and the list the DataSource registers |

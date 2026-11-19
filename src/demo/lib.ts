@@ -11,6 +11,8 @@ import { writeSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { type ChannelModel, type ConfirmChannel, connect } from 'amqplib';
+import type { DataSource } from 'typeorm';
+import { createSchemaDataSource } from '../schema-data-source.js';
 import type { ConsumerLine } from '../consumer/report.js';
 import { bootstrapRabbitMQ } from '../messaging/bootstrap.js';
 import {
@@ -25,6 +27,7 @@ const DEADLINE_MS = 60_000;
 const CONSUMER_ENTRY = fileURLToPath(
   new URL('../consumer/main.js', import.meta.url),
 );
+const RELAY_ENTRY = fileURLToPath(new URL('../relay/main.js', import.meta.url));
 
 export const log = (message: string) => console.error(`[demo] ${message}`);
 
@@ -272,3 +275,80 @@ export const linesOf = <E extends ConsumerLine['event']>(
   lines: ConsumerLine[],
   event: E,
 ) => lines.filter((line): line is Extract<ConsumerLine, { event: E }> => line.event === event);
+
+// --- HW#22: the relay as a child process, setup, polling ----------------------
+
+export interface Relay {
+  exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
+  // SIGTERM (finishes its batch), then SIGKILL if it hangs.
+  stop(): Promise<void>;
+}
+
+// The real relay (dist/relay/main.js), with this process's environment.
+// `crashAfterConfirm` sets its demo-only kill switch (both variables it needs). Its
+// stdout (the publisher's Nest logger) goes to our stderr, so stdout keeps only the
+// result lines.
+export function startRelay({ crashAfterConfirm = false } = {}): Relay {
+  const env = { ...process.env };
+  delete env.RELAY_CRASH_AFTER_CONFIRM;
+  delete env.DEMO_RUN;
+  if (crashAfterConfirm) {
+    env.RELAY_CRASH_AFTER_CONFIRM = '1';
+    env.DEMO_RUN = '1';
+  }
+
+  const child = spawn(process.execPath, [RELAY_ENTRY], {
+    env,
+    stdio: ['ignore', 2, 'inherit'],
+  });
+  children.add(child);
+  const exited = new Promise<{
+    code: number | null;
+    signal: NodeJS.Signals | null;
+  }>((resolve) =>
+    child.on('exit', (code, signal) => {
+      children.delete(child);
+      resolve({ code, signal });
+    }),
+  );
+  const stop = async () => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    child.kill('SIGTERM');
+    const timer = setTimeout(() => child.kill('SIGKILL'), 5_000);
+    await exited;
+    clearTimeout(timer);
+  };
+  return { exited, stop };
+}
+
+// What every HW#22 demo needs on a fresh stack (the grader starts with only docker
+// compose): the schema (pending migrations, as the schema owner; a no-op when
+// they've run), then the broker's policies and topology, then empty queues.
+// Returns the schema owner's DataSource too (demo:crash-write creates a trigger with
+// it; app_user can't).
+export async function prepare(
+  onCleanup: (fn: () => Promise<void>) => void,
+): Promise<{ broker: Broker; admin: DataSource }> {
+  const admin = createSchemaDataSource(requireEnv('MIGRATIONS_DB_URL'));
+  await admin.initialize();
+  onCleanup(() => admin.destroy());
+  const ran = await admin.runMigrations({ transaction: 'each' });
+  log(`migrations: ${ran.length === 0 ? 'up to date' : `${ran.length} applied`}`);
+
+  const broker = await resetBroker(requireEnv('RABBITMQ_URL'));
+  onCleanup(() => broker.connection.close());
+  return { broker, admin };
+}
+
+// Polls `check` every 200 ms until it returns true, up to `ms`. false on timeout.
+export async function waitUntil(
+  check: () => Promise<boolean> | boolean,
+  ms: number,
+): Promise<boolean> {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    if (await check()) return true;
+    await sleep(POLL_MS);
+  }
+  return check();
+}

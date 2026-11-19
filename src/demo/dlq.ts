@@ -1,5 +1,5 @@
-// npm run demo:dlq — one poison message (order.placed version 2, which this
-// consumer doesn't know) → rejected without requeue → parked in the DLQ with
+// npm run demo:dlq — one poison message (an old order.placed version 1, which this
+// consumer no longer reads) → rejected without requeue → parked in the DLQ with
 // x-first-death-reason, no invoice written.
 //
 // rejected=… work=0 dlq=1 dlq-reason=rejected effect=0
@@ -22,7 +22,7 @@ import {
   startConsumer,
   waitForDepth,
 } from './lib.js';
-import { countInvoices, openShop } from './shop.js';
+import { openAppDb } from './run.js';
 
 // The reasons RabbitMQ gives a dead letter.
 const DEATH_REASONS = ['rejected', 'expired', 'maxlen', 'delivery_limit'];
@@ -46,22 +46,22 @@ async function peekDeathReason(broker: Broker): Promise<string> {
 await runDemo('demo:dlq', async (onCleanup) => {
   const broker = await resetBroker(requireEnv('RABBITMQ_URL'));
   onCleanup(() => broker.connection.close());
-  const shop = await openShop();
-  onCleanup(() => shop.close());
+  const db = await openAppDb();
+  onCleanup(() => db.destroy());
 
   const consumer = startConsumer();
   if (!(await consumer.waitFor((lines) => linesOf(lines, 'ready').length > 0, 10_000))) {
     throw new Error('the consumer did not start (see its log above)');
   }
 
-  // A fresh id per run (no order_events row has one this large), so the effect
-  // check below counts only this message. Otherwise a valid v1 body: only the
-  // version makes it poison.
+  // A v1 message, as HW#19 published them: a digits eventId and version 1. The
+  // v2 reader rejects it. A fresh id per run (no order_events row has one this
+  // large), so the effect check below counts only this message.
   const eventId = String(Date.now());
   const poison = {
     eventId,
     type: 'order.placed',
-    version: 2,
+    version: 1,
     occurredAt: new Date().toISOString(),
     data: {
       orderId: 1,
@@ -85,7 +85,7 @@ await runDemo('demo:dlq', async (onCleanup) => {
       (error) => (error ? reject(error) : resolve()),
     ),
   );
-  log(`published poison eventId=${eventId} (version 2)`);
+  log(`published poison eventId=${eventId} (version 1)`);
 
   const handled = await consumer.waitFor(
     (lines) => linesOf(lines, 'rejected').some((line) => line.messageId === eventId),
@@ -102,7 +102,12 @@ await runDemo('demo:dlq', async (onCleanup) => {
   // Measured after the peek, so the printed depth is what the DLQ holds at the end.
   const work = await settledDepth(broker.channel, INVOICING_QUEUE);
   const dlq = await settledDepth(broker.channel, DEAD_LETTER_QUEUE);
-  const effect = await countInvoices(shop.dataSource, [eventId]);
+  // The poison never reaches the inbox: no processed_messages row for its id (and
+  // so no invoice). Compared as text: its id is digits, not a uuid.
+  const [{ effect }] = (await db.query(
+    'SELECT count(*)::int AS effect FROM processed_messages WHERE message_id::text = $1',
+    [eventId],
+  )) as { effect: number }[];
   const rejected = linesOf(consumer.lines, 'rejected');
 
   printResults([

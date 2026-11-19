@@ -8,8 +8,10 @@ import {
   Patch,
   Post,
   Query,
+  Res,
   Sse,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import {
   type CreateOrder,
   OrdersService,
@@ -31,12 +33,20 @@ export class OrdersController {
     return this.ordersService.getById(Number(id));
   }
 
+  // 201 with the order, first time and on a replay alike; a replay also carries
+  // Idempotent-Replayed: true. passthrough keeps Nest sending the return value.
   @Post()
-  create(
+  async create(
     @Headers('idempotency-key') idempotencyKey: string,
     @Body() body: CreateOrder,
+    @Res({ passthrough: true }) res: Response,
   ) {
-    return this.ordersService.create(idempotencyKey, body);
+    const { order, replayed } = await this.ordersService.create(
+      idempotencyKey,
+      body,
+    );
+    if (replayed) res.setHeader('Idempotent-Replayed', 'true');
+    return order;
   }
 
   @Patch(':id/status')

@@ -12,9 +12,11 @@ export type ConsumerLine =
       // x-delivery-count: how many times the broker has handed it out before.
       deliveryCount: number;
     }
-  // After the ack: a new invoice, or one an earlier delivery already wrote.
+  // After the commit and the ack: a new invoice, or nothing to do. skipped's reason
+  // says which level caught it: 'duplicate' (processed_messages, this event again)
+  // or 'order already invoiced' (the natural key, another event for the order).
   | { event: 'applied'; messageId: string }
-  | { event: 'skipped'; messageId: string }
+  | { event: 'skipped'; messageId: string; reason: string }
   | {
       event: 'rejected';
       messageId: string | null;
