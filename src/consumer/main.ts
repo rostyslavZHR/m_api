@@ -1,6 +1,7 @@
 // The invoicing consumer: a separate process (npm run consumer), with its own DB
 // pool and its own AMQP connection. It reads order.placed from shop.invoicing and
-// writes one invoice per event, acking only after the invoice has committed.
+// writes one invoice per event, then adds the invoice-email job (BullMQ), acking
+// only after both.
 //
 // stdout: one JSON line per delivery and per outcome (report.ts), for the demos.
 // stderr: human-readable logs.
@@ -12,6 +13,7 @@ import {
   type ConsumeMessage,
   connect,
 } from 'amqplib';
+import type { Queue } from 'bullmq';
 import type { DataSource } from 'typeorm';
 import { type Env, validate } from '../config/env.schema.js';
 import { createAppDataSource } from '../db/app-data-source.js';
@@ -20,6 +22,8 @@ import {
   orderPlacedReader,
 } from '../messaging/order-placed.js';
 import { INVOICING_QUEUE, declareTopology } from '../messaging/topology.js';
+import { addInvoiceEmail, createJobsQueue } from '../jobs/jobs.js';
+import { closeRedis, createQueueClient } from '../redis/redis-clients.js';
 import { insertInvoice } from './invoices.js';
 import { report } from './report.js';
 
@@ -86,6 +90,7 @@ const isPermanent = (error: unknown): boolean => {
 async function handle(
   channel: Channel,
   dataSource: DataSource,
+  jobs: Queue,
   message: ConsumeMessage,
 ): Promise<void> {
   const messageId =
@@ -118,6 +123,11 @@ async function handle(
   try {
     // One transaction: the processed_messages row and the invoice commit together.
     result = await insertInvoice(dataSource, parsed.event);
+    // Then the email job, before the ack, for every outcome, a skipped duplicate
+    // too: if an earlier delivery committed and died before adding it, this one
+    // adds it. The job id makes a second add a no-op. A Redis error is transient:
+    // the message is requeued below and the add retried with it.
+    await addInvoiceEmail(jobs, parsed.event.data.orderId);
   } catch (error) {
     const code = (error as { code?: unknown }).code;
     const reason = `${typeof code === 'string' ? code : 'no code'}: ${errorText(error)}`;
@@ -161,6 +171,7 @@ interface Session {
 async function openSession(
   env: Env,
   dataSource: DataSource,
+  jobs: Queue,
   inFlight: Set<Promise<void>>,
   onLost: () => void,
 ): Promise<Session> {
@@ -196,7 +207,7 @@ async function openSession(
           void connection.close().catch(() => {});
           return;
         }
-        const work = handle(channel, dataSource, message)
+        const work = handle(channel, dataSource, jobs, message)
           .catch((error: unknown) =>
             log(`handler failed: ${(error as Error).message}`),
           )
@@ -222,6 +233,8 @@ async function main(): Promise<void> {
   const dataSource = await createAppDataSource(env.DB_URL, {
     poolSize: PREFETCH,
   }).initialize();
+  const redis = createQueueClient(env.REDIS_QUEUE_URL);
+  const jobs = createJobsQueue(redis);
 
   const inFlight = new Set<Promise<void>>();
   let session: Session | undefined;
@@ -232,7 +245,7 @@ async function main(): Promise<void> {
   const connectWithRetry = async (): Promise<void> => {
     for (let attempt = 0; !stopping.signal.aborted; attempt++) {
       try {
-        session = await openSession(env, dataSource, inFlight, onLost);
+        session = await openSession(env, dataSource, jobs, inFlight, onLost);
         return;
       } catch (error) {
         const delay = backoff(attempt);
@@ -264,6 +277,8 @@ async function main(): Promise<void> {
       await current?.channel.cancel(current.consumerTag).catch(() => {});
       await Promise.allSettled(inFlight);
       if (current) await current.connection.close().catch(() => {});
+      await jobs.close();
+      await closeRedis(redis);
       await dataSource.destroy();
       process.exit(0);
     } catch (error) {

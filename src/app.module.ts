@@ -8,6 +8,7 @@ import { DbModule } from './db/db.module.js';
 import { RealtimeModule } from './realtime/realtime.module.js';
 import { RedisModule } from './redis/redis.module.js';
 import { SessionsModule } from './sessions/sessions.module.js';
+import { JobsModule } from './jobs/jobs.module.js';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { SessionsModule } from './sessions/sessions.module.js';
     DbModule,
     RedisModule,
     SessionsModule,
+    JobsModule,
     RealtimeModule,
   ],
 })

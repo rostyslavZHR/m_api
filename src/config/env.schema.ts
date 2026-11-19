@@ -8,6 +8,12 @@ export const envSchema = z.object({
   // queue (noeviction, AOF: BullMQ jobs and sessions). Never the same instance.
   REDIS_CACHE_URL: z.url({ protocol: /^rediss?$/ }),
   REDIS_QUEUE_URL: z.url({ protocol: /^rediss?$/ }),
+  // The cleanup scheduler runs daily at 03:00; set (in ms, at least 1000) only for a
+  // demo, to make it fire every few seconds. Empty means unset, as in .env.example.
+  CLEANUP_EVERY_MS: z.preprocess(
+    (value) => (value === '' ? undefined : value),
+    z.coerce.number().int().min(1000).optional(),
+  ),
 });
 
 export type Env = z.infer<typeof envSchema>;
