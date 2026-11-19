@@ -22,7 +22,10 @@ export type ConsumerLine =
       messageId: string | null;
       requeue: boolean;
       reason: string;
-    };
+    }
+  // The invoice committed but the email job couldn't be added (Redis down): put
+  // back with nack, which doesn't count toward the delivery limit.
+  | { event: 'requeued'; messageId: string; reason: string };
 
 // Synchronous on purpose: Node writes to a pipe asynchronously, so a line passed to
 // console.log right before a SIGKILL can be lost. writeSync is on its way to the

@@ -49,6 +49,9 @@ const errorText = (error: unknown): string => {
 // Waits that double each time, from 1 s up to 30 s: attempt 0 → 1 s, 1 → 2 s, …
 const backoff = (attempt: number) => Math.min(1_000 * 2 ** attempt, 30_000);
 
+// The pause before a message whose job add failed goes back (see handle()).
+const JOB_ADD_RETRY_MS = 5_000;
+
 // Aborted on SIGTERM/SIGINT: cuts every wait short (a retry pause, a reconnect
 // pause) and stops reconnecting, so a stop is never held up by a backoff.
 const stopping = new AbortController();
@@ -108,8 +111,9 @@ async function handle(
     deliveryCount,
   });
 
-  // reject, never nack: on quorum queues (RabbitMQ 4.x) only reject with requeue
+  // reject, not nack: on quorum queues (RabbitMQ 4.x) only reject with requeue
   // counts toward the delivery-limit, so a transient failure can't loop forever.
+  // The one exception is a failed job add after the commit (nack, below).
   const reject = (requeue: boolean, reason: string) => {
     channel.reject(message, requeue);
     report({ event: 'rejected', messageId, requeue, reason });
@@ -123,11 +127,6 @@ async function handle(
   try {
     // One transaction: the processed_messages row and the invoice commit together.
     result = await insertInvoice(dataSource, parsed.event);
-    // Then the email job, before the ack, for every outcome, a skipped duplicate
-    // too: if an earlier delivery committed and died before adding it, this one
-    // adds it. The job id makes a second add a no-op. A Redis error is transient:
-    // the message is requeued below and the add retried with it.
-    await addInvoiceEmail(jobs, parsed.event.data.orderId);
   } catch (error) {
     const code = (error as { code?: unknown }).code;
     const reason = `${typeof code === 'string' ? code : 'no code'}: ${errorText(error)}`;
@@ -142,6 +141,27 @@ async function handle(
     // Stopping: leave it unacked; closing the channel returns it to the queue.
     if (!(await pause(delay))) return;
     return reject(true, reason);
+  }
+
+  // Then the email job, before the ack, for every outcome, a skipped duplicate too:
+  // if an earlier delivery committed and died before adding it, this one adds it.
+  // The job id makes a second add a no-op.
+  //
+  // If Redis is down, the message goes back with nack, not reject: on quorum queues
+  // only reject counts toward the delivery limit, and this message is fine (its
+  // invoice is committed); a long Redis outage mustn't dead-letter valid events.
+  // nack doesn't raise x-delivery-count, so the pause is fixed, not the growing
+  // backoff. The cost: a job add that could never succeed would loop, one try per
+  // message every 5 s, visible in the log, until fixed.
+  try {
+    await addInvoiceEmail(jobs, parsed.event.data.orderId);
+  } catch (error) {
+    const reason = `invoice-email job not added: ${errorText(error)}`;
+    log(`messageId=${messageId}: ${reason}; requeue (nack) in ${JOB_ADD_RETRY_MS} ms`);
+    if (!(await pause(JOB_ADD_RETRY_MS))) return;
+    channel.nack(message, false, true);
+    report({ event: 'requeued', messageId: parsed.event.eventId, reason });
+    return;
   }
 
   if (CRASH_AFTER_EFFECT) {
