@@ -7,20 +7,22 @@
 // instances=2 limit=5 requests=10 allowed=5 blocked=5 status=429 retry-after=1
 //
 // Every run comes from 127.0.0.1, and a run within 10 s of the last one would
-// start with its entries still in the window: this route's counters are deleted
-// first (SCAN + UNLINK), and again at the end.
+// start with its entries still in the window: the demo's own counter (this route,
+// client ip:127.0.0.1) is deleted first, and again at the end. Other clients'
+// counters are left alone.
 import { randomUUID } from 'node:crypto';
 import { cardKey } from '../products/products.service.js';
 import { RATE_LIMIT } from '../rate-limit/rate-limiter.js';
 import { closeRedis, createCacheClient, createRateLimitClient } from '../redis/redis-clients.js';
 import { startApi } from './api.js';
-import { checker, connected, deleteMatching, log, migrate, printResults, requireEnv, runDemo } from './lib.js';
+import { checker, connected, log, migrate, printResults, requireEnv, runDemo } from './lib.js';
 import { openAppDb } from './run.js';
 
 const INSTANCES = 2;
 const REQUESTS = 2 * RATE_LIMIT.limit;
-// The guard's key: rl:<Controller.handler>:<client>.
-const ROUTE_KEYS = 'rl:ProductsController.card:*';
+// The guard's key, rl:<Controller.handler>:<client>, for this demo's requests: the
+// apps listen on 127.0.0.1 and the demo calls them there.
+const DEMO_KEY = 'rl:ProductsController.card:ip:127.0.0.1';
 
 await runDemo('demo:ratelimit', async (onCleanup) => {
   await migrate(onCleanup);
@@ -42,9 +44,9 @@ await runDemo('demo:ratelimit', async (onCleanup) => {
     await db.query('DELETE FROM products WHERE id = $1', [productId]);
   });
 
-  log(`stale counters for this route removed: ${await deleteMatching(counters, ROUTE_KEYS)}`);
+  log(`the demo's counter from an earlier run removed: ${await counters.del(DEMO_KEY)}`);
   onCleanup(async () => {
-    await deleteMatching(counters, ROUTE_KEYS);
+    await counters.del(DEMO_KEY);
   });
 
   const apis = [];
