@@ -20,11 +20,19 @@ export const createCacheClient = (url: string): Redis =>
     'cache',
   );
 
-// The queue instance holds jobs and sessions, which must not be dropped: ioredis's
-// defaults (commands queue while reconnecting, retried). BullMQ's worker gets its
-// own connection with maxRetriesPerRequest: null in Phase F (wait for Redis).
+// The BullMQ producer (Queue: add, the scheduler) on the queue instance. Fails fast
+// while Redis is down, as BullMQ recommends for producers: the caller sees the
+// error at once (the consumer requeues its message) instead of waiting on
+// commands queued for a reconnect.
 export const createQueueClient = (url: string): Redis =>
-  named(new Redis(url, { connectionName: 'm_api:queue' }), 'queue');
+  named(new Redis(url, { connectionName: 'm_api:queue', enableOfflineQueue: false }), 'queue');
+
+// The BullMQ worker's connection: the opposite of the cache. maxRetriesPerRequest:
+// null (BullMQ requires it for workers) makes its blocking commands wait for Redis
+// to come back instead of failing, so a Redis restart pauses the worker and
+// doesn't crash it.
+export const createWorkerClient = (url: string): Redis =>
+  named(new Redis(url, { connectionName: 'm_api:worker', maxRetriesPerRequest: null }), 'worker');
 
 // Sessions live on the queue instance (noeviction, AOF) but get their own client:
 // a session is read on every request that carries the cookie, so it must not hang
@@ -43,6 +51,24 @@ export const createSessionClient = (url: string): Redis =>
       connectionName: 'm_api:sessions',
     }),
     'sessions',
+  );
+
+// Rate-limit counters live on the queue instance too (noeviction: on the cache an
+// evicted counter would hand its client a fresh allowance), with their own
+// fail-fast client: the check runs before every limited request, and when Redis
+// doesn't answer the guard lets the request through, so it must give up quickly.
+export const RATE_LIMIT_COMMAND_TIMEOUT_MS = 200;
+
+export const createRateLimitClient = (url: string): Redis =>
+  named(
+    new Redis(url, {
+      commandTimeout: RATE_LIMIT_COMMAND_TIMEOUT_MS,
+      enableOfflineQueue: false,
+      maxRetriesPerRequest: 0,
+      connectTimeout: 1_000,
+      connectionName: 'm_api:rate-limit',
+    }),
+    'rate-limit',
   );
 
 // Without a listener ioredis prints every reconnect error as "Unhandled error

@@ -5,9 +5,10 @@ import { OrdersController } from './orders.controller.js';
 import { OrdersRepository } from './orders.repository.js';
 import { OrdersService } from './orders.service.js';
 import { OrderEventsModule } from '../order-events/order-events.module.js';
+import { RateLimitModule } from '../rate-limit/rate-limit.module.js';
 
 @Module({
-  imports: [DbModule, OrderEventsModule],
+  imports: [DbModule, OrderEventsModule, RateLimitModule],
   controllers: [OrdersController],
   providers: [
     {

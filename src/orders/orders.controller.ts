@@ -10,8 +10,10 @@ import {
   Query,
   Res,
   Sse,
+  UseGuards,
 } from '@nestjs/common';
 import type { Response } from 'express';
+import { RateLimitGuard } from '../rate-limit/rate-limit.guard.js';
 import {
   type CreateOrder,
   OrdersService,
@@ -35,7 +37,9 @@ export class OrdersController {
 
   // 201 with the order, first time and on a replay alike; a replay also carries
   // Idempotent-Replayed: true. passthrough keeps Nest sending the return value.
+  // Rate limited: checkout is the most expensive write.
   @Post()
+  @UseGuards(RateLimitGuard)
   async create(
     @Headers('idempotency-key') idempotencyKey: string,
     @Body() body: CreateOrder,

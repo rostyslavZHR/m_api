@@ -73,6 +73,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
   /sessions:
     post:
@@ -285,6 +287,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
   /orders/{id}/status:
     patch:
@@ -370,6 +374,22 @@ paths:
                 $ref: '#/components/schemas/Problem'
 
 components:
+  responses:
+    TooManyRequests:
+      description: >
+        Rate limited: at most 5 requests per 10 seconds per client (the session's
+        user, otherwise the IP address) on this route, over a sliding window.
+      headers:
+        Retry-After:
+          description: Whole seconds until a request would pass again; at least 1.
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
   schemas:
     Problem:
       type: object

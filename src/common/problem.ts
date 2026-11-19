@@ -30,6 +30,9 @@ function problemInfo(status: number): { type: string; title: string } {
   if (status === 401) {
     return { type: 'https://example.com/problems/unauthorized', title: 'Unauthorized' };
   }
+  if (status === 429) {
+    return { type: 'https://example.com/problems/too-many-requests', title: 'Too Many Requests' };
+  }
   if (status === 503) {
     return { type: 'https://example.com/problems/unavailable', title: 'Service Unavailable' };
   }
