@@ -39,6 +39,119 @@ paths:
               schema:
                 $ref: '#/components/schemas/Problem'
 
+  /products/{id}/card:
+    get:
+      operationId: getProductCard
+      summary: Get a product card with sales aggregates
+      description: |
+        Served from a cache (cache-aside, TTL 300–360 s), so the stock and the
+        sales figures can be up to about 6 minutes old. Checkout always checks the
+        real stock.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The ID of the product.
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: The product card
+          headers:
+            X-Cache:
+              description: HIT when served from the cache, MISS when read from the database.
+              schema:
+                type: string
+                enum: [HIT, MISS]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductCard'
+        '404':
+          description: Product not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /sessions:
+    post:
+      operationId: createSession
+      summary: Start a session for a user (a stand-in for login)
+      description: |
+        Stores the session in Redis and returns its id only in the `sid` cookie
+        (HttpOnly, SameSite=Lax, Secure in production). Any request carrying the
+        cookie restarts the session's 30-minute idle timeout; it ends after 7 days
+        whatever the activity. A session already on the request is replaced.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                user_id:
+                  type: integer
+                  minimum: 1
+              required: [user_id]
+      responses:
+        '201':
+          description: The session was created
+          headers:
+            Set-Cookie:
+              description: sid=<session id>; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '400':
+          description: Invalid body
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: No such user
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          description: The session store is unavailable
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /session:
+    get:
+      operationId: getSession
+      summary: The current session (from the sid cookie), renewed by this request
+      responses:
+        '200':
+          description: The session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '401':
+          description: No session cookie, or the session expired (the cookie is cleared)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          description: The session store is unavailable (not a logout)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
   /products:
     get:
       operationId: listProducts
@@ -174,6 +287,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
   /orders/{id}/status:
     patch:
@@ -259,6 +374,22 @@ paths:
                 $ref: '#/components/schemas/Problem'
 
 components:
+  responses:
+    TooManyRequests:
+      description: >
+        Rate limited: at most 5 requests per 10 seconds per client (the session's
+        user, otherwise the IP address) on this route, over a sliding window.
+      headers:
+        Retry-After:
+          description: Whole seconds until a request would pass again; at least 1.
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
   schemas:
     Problem:
       type: object
@@ -297,6 +428,76 @@ components:
         - title
         - price_cents
         - in_stock
+
+    ProductCard:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        description:
+          type: string
+        price_cents:
+          type: integer
+        stock:
+          type: integer
+        in_stock:
+          type: boolean
+        sales:
+          description: Over all orders of the product except cancelled ones.
+          type: object
+          additionalProperties: false
+          properties:
+            units_sold:
+              type: integer
+            orders:
+              type: integer
+            buyers:
+              type: integer
+            revenue_cents:
+              type: integer
+            units_sold_30d:
+              type: integer
+            last_ordered_at:
+              type: string
+              format: date-time
+              nullable: true
+          required: [units_sold, orders, buyers, revenue_cents, units_sold_30d, last_ordered_at]
+        bought_together:
+          description: Up to 3 products most often bought in the same orders.
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              product_id:
+                type: integer
+              title:
+                type: string
+              orders:
+                type: integer
+            required: [product_id, title, orders]
+      required: [id, title, description, price_cents, stock, in_stock, sales, bought_together]
+
+    Session:
+      type: object
+      additionalProperties: false
+      properties:
+        user_id:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        idle_ttl_seconds:
+          description: The session ends after this long without a request.
+          type: integer
+        expires_at:
+          description: The absolute end, whatever the activity.
+          type: string
+          format: date-time
+      required: [user_id, created_at, idle_ttl_seconds, expires_at]
 
     OrderItem:
       type: object

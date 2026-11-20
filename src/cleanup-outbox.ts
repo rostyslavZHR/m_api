@@ -1,19 +1,15 @@
-// npm run outbox:cleanup: deletes outbox rows published more than 7 days ago. Rows
-// still waiting (published_at IS NULL, parked ones included) are never touched.
-// Consumers dedupe by the event id in processed_messages, not by the outbox row, so
-// a later redelivery is still skipped. Meant to run periodically (cron, like
-// backup.cron); safe to run any time.
+// npm run outbox:cleanup: one retention cleanup, by hand or from cron (like backup.cron).
+// The same DELETE runs daily as the scheduled BullMQ job (src/jobs); the
+// retention and the reasoning live in src/maintenance/cleanup.ts.
+import { CLEANUPS, runCleanup } from './maintenance/cleanup.js';
 import { runtimeDataSource as dataSource } from './runtime-data-source.js';
 
-const RETENTION = '7 days';
+const cleanup = CLEANUPS.outbox;
 
 await dataSource.initialize();
 try {
-  const [, deleted] = (await dataSource.query(
-    `DELETE FROM outbox WHERE published_at < now() - $1::interval`,
-    [RETENTION],
-  )) as [unknown[], number];
-  console.log(`outbox rows published more than ${RETENTION} ago deleted: ${deleted}`);
+  const deleted = await runCleanup(dataSource, cleanup);
+  console.log(`${cleanup.name} older than ${cleanup.retention} deleted: ${deleted}`);
 } finally {
   await dataSource.destroy();
 }

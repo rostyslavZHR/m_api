@@ -1,4 +1,5 @@
-// Shared by the three RabbitMQ demos (publish.ts, dlq.ts, duplicate.ts).
+// Shared by the demos: the HW#22 messaging ones (outbox, crash-write, crash-relay,
+// dlq) and the HW#23 Redis ones (cache, session, ratelimit, queue).
 //
 // stdout carries only the result lines, exactly key=value, for the grader's
 // `grep -qx`. Everything else (progress, failed checks, the consumer's logs) goes
@@ -11,6 +12,7 @@ import { writeSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { type ChannelModel, type ConfirmChannel, connect } from 'amqplib';
+import type { Redis } from 'ioredis';
 import type { DataSource } from 'typeorm';
 import { createSchemaDataSource } from '../schema-data-source.js';
 import type { ConsumerLine } from '../consumer/report.js';
@@ -329,15 +331,50 @@ export function startRelay({ crashAfterConfirm = false } = {}): Relay {
 export async function prepare(
   onCleanup: (fn: () => Promise<void>) => void,
 ): Promise<{ broker: Broker; admin: DataSource }> {
+  const admin = await migrate(onCleanup);
+  const broker = await resetBroker(requireEnv('RABBITMQ_URL'));
+  onCleanup(() => broker.connection.close());
+  return { broker, admin };
+}
+
+// The schema on a fresh stack: pending migrations, as the schema owner (a no-op when
+// they've run). Returns the schema owner's DataSource.
+export async function migrate(onCleanup: (fn: () => Promise<void>) => void): Promise<DataSource> {
   const admin = createSchemaDataSource(requireEnv('MIGRATIONS_DB_URL'));
   await admin.initialize();
   onCleanup(() => admin.destroy());
   const ran = await admin.runMigrations({ transaction: 'each' });
   log(`migrations: ${ran.length === 0 ? 'up to date' : `${ran.length} applied`}`);
+  return admin;
+}
 
-  const broker = await resetBroker(requireEnv('RABBITMQ_URL'));
-  onCleanup(() => broker.connection.close());
-  return { broker, admin };
+// The app's Redis clients fail fast and send nothing before the connection is up:
+// wait for it, or fail the setup (exit 2) instead of measuring a dead Redis.
+export async function connected(client: Redis, ms = 5_000): Promise<Redis> {
+  if (client.status === 'ready') return client;
+  const ready = await Promise.race([
+    new Promise<boolean>((resolve) => client.once('ready', () => resolve(true))),
+    sleep(ms).then(() => false),
+  ]);
+  if (!ready) throw new SetupError(`Redis (${client.options.connectionName}) not reachable within ${ms / 1000} s`);
+  return client;
+}
+
+// The keys matching a pattern, by SCAN (never KEYS, which blocks Redis while it
+// walks the whole keyspace).
+export async function scanKeys(redis: Redis, pattern: string): Promise<string[]> {
+  const found: string[] = [];
+  for await (const keys of redis.scanStream({ match: pattern, count: 1_000 })) found.push(...(keys as string[]));
+  return found;
+}
+
+// Deletes them in batches (UNLINK frees the memory in the background).
+export async function deleteMatching(redis: Redis, pattern: string): Promise<number> {
+  let deleted = 0;
+  for await (const keys of redis.scanStream({ match: pattern, count: 1_000 })) {
+    if ((keys as string[]).length > 0) deleted += await redis.unlink(...(keys as string[]));
+  }
+  return deleted;
 }
 
 // Polls `check` every 200 ms until it returns true, up to `ms`. false on timeout.

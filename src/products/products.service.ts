@@ -1,6 +1,14 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import type { Redis } from 'ioredis';
 import type { ProductEntity } from '../entities/index.js';
-import { ProductsRepository } from './products.repository.js';
+import { cacheAside, type Ttl } from '../redis/cache-aside.js';
+import { REDIS_CACHE } from '../redis/redis.module.js';
+import { type ProductCard, ProductsRepository } from './products.repository.js';
+
+// v1: bump it when the card's shape changes, and every old entry is ignored at once.
+export const cardKey = (id: number) => `product:card:${id}:v1`;
+// 300–360 s.
+export const CARD_TTL: Ttl = { baseSeconds: 300, jitterSeconds: 60 };
 
 // The Product schema in openapi/openapi.yaml.
 export interface Product {
@@ -20,7 +28,10 @@ const toProduct = (entity: ProductEntity): Product => ({
 
 @Injectable()
 export class ProductsService {
-  constructor(private readonly products: ProductsRepository) {}
+  constructor(
+    private readonly products: ProductsRepository,
+    @Inject(REDIS_CACHE) private readonly cache: Redis,
+  ) {}
 
   async findAll(): Promise<Product[]> {
     return (await this.products.findAll()).map(toProduct);
@@ -37,5 +48,17 @@ export class ProductsService {
       throw new NotFoundException(`Product ${id} not found.`);
     }
     return product;
+  }
+
+  // Cache-aside around the card's aggregate query. hit tells the controller
+  // which path served it (the X-Cache header).
+  async getCard(id: number): Promise<{ card: ProductCard; hit: boolean }> {
+    const { value, hit } = await cacheAside(this.cache, cardKey(id), CARD_TTL, () =>
+      this.products.findCard(String(id)),
+    );
+    if (!value) {
+      throw new NotFoundException(`Product ${id} not found.`);
+    }
+    return { card: value, hit };
   }
 }

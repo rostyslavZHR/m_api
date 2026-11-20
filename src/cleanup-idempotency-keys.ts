@@ -1,17 +1,15 @@
-// npm run idempotency:cleanup: deletes Idempotency-Keys older than 24 h. A retry
-// after that creates a new order. Meant to run periodically (cron, like
-// backup.cron); safe to run any time.
+// npm run idempotency:cleanup: one retention cleanup, by hand or from cron (like backup.cron).
+// The same DELETE runs daily as the scheduled BullMQ job (src/jobs); the
+// retention and the reasoning live in src/maintenance/cleanup.ts.
+import { CLEANUPS, runCleanup } from './maintenance/cleanup.js';
 import { runtimeDataSource as dataSource } from './runtime-data-source.js';
 
-const RETENTION = '24 hours';
+const cleanup = CLEANUPS.idempotencyKeys;
 
 await dataSource.initialize();
 try {
-  const [, deleted] = (await dataSource.query(
-    `DELETE FROM idempotency_keys WHERE created_at < now() - $1::interval`,
-    [RETENTION],
-  )) as [unknown[], number];
-  console.log(`idempotency keys older than ${RETENTION} deleted: ${deleted}`);
+  const deleted = await runCleanup(dataSource, cleanup);
+  console.log(`${cleanup.name} older than ${cleanup.retention} deleted: ${deleted}`);
 } finally {
   await dataSource.destroy();
 }

@@ -1,12 +1,13 @@
 import { Module } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { DbModule } from '../db/db.module.js';
+import { RateLimitModule } from '../rate-limit/rate-limit.module.js';
 import { ProductsController } from './products.controller.js';
 import { ProductsRepository } from './products.repository.js';
 import { ProductsService } from './products.service.js';
 
 @Module({
-  imports: [DbModule],
+  imports: [DbModule, RateLimitModule],
   controllers: [ProductsController],
   providers: [
     {

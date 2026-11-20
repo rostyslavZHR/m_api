@@ -6,7 +6,47 @@
 
 ## Grading
 
-HW#22 (Outbox та ідемпотентність). From a fresh clone, in the repository root (where `package.json` is). Nothing needs to be running but Docker: each demo builds, applies pending migrations, sets up the RabbitMQ topology and starts its own relay and consumer (see [The demos](#the-demos)).
+HW#23 (Redis: кеш, сесії, ліміти, черга). From a fresh clone, in the repository root (where `package.json` is). Nothing needs to be running but Docker: each demo builds, applies pending migrations, and creates and removes its own data (see [the Redis section](#redis-кеш-сесії-ліміти-черга-hw23-cache-sessions-rate-limit-queue)).
+
+The scripts normally load credentials from the local store through `scripts/with-secrets.sh`. A fresh clone has no store, so the values come from the environment (`SKIP_VAULT=1`). They're the dev-only bootstrap accounts committed in [docker-compose.yml](docker-compose.yml), [init.sql](init.sql) and [pgbouncer/userlist.txt](pgbouncer/userlist.txt), not secrets. The env schema requires all five URLs at startup, and `demo:session` and `demo:ratelimit` start the whole app, so all five are exported:
+- `DB_URL`: the app's connection, `app_user` through PgBouncer. The app ignores any password in it and reads `secrets/db_password` (gitignored), so the block creates that file.
+- `MIGRATIONS_DB_URL`: the schema owner, for the demos' migrations.
+- `RABBITMQ_URL`: the brief's `BROKER_URL`, under the name the code reads. Host port 21113 is the AMQP port (5672 in the container).
+- `REDIS_CACHE_URL`, `REDIS_QUEUE_URL`: the two Redis instances, `redis-cache` (21115) and `redis-queue` (21116), no password in dev.
+
+```bash
+docker compose up -d --wait
+
+export DB_URL=postgres://app_user@localhost:21111/shop
+export MIGRATIONS_DB_URL=postgres://admin:admin-bootstrap-only@localhost:21110/shop
+export RABBITMQ_URL=amqp://app:rabbitmq-dev-only@127.0.0.1:21113
+export REDIS_CACHE_URL=redis://127.0.0.1:21115
+export REDIS_QUEUE_URL=redis://127.0.0.1:21116
+export SKIP_VAULT=1
+mkdir -p secrets && printf 'app-v1-password' > secrets/db_password
+
+npm ci
+
+npm run demo:cache; echo "exit=$?"
+npm run demo:session; echo "exit=$?"
+npm run demo:ratelimit; echo "exit=$?"
+npm run demo:queue; echo "exit=$?"
+```
+
+| Demo | stdout (exactly these lines) | Takes, with the build |
+|---|---|---|
+| `demo:cache` | `cache-lru=1` `cache-maxmemory=1` `warmed=50` `ttl-distinct=…` (≥ 5) `concurrent=25` `db-calls=1` `db-calls-warm=0` | ~3 s |
+| `demo:session` | `requests=3` `sessions=1` `in-redis=1` `ttl-renewed=1` | ~5 s |
+| `demo:ratelimit` | `instances=2` `limit=5` `requests=10` `allowed=5` `blocked=5` `status=429` `retry-after=1` | ~3 s |
+| `demo:queue` | `queue-noeviction=1` `attempts=3` `completed=1` `added=2` `queued=1` `schedulers=1` `scheduled-runs=…` (≥ 2) | ~7 s |
+
+Each npm script runs `npm run build` first (about 3 s of each time). Exit codes: `0` every check held, `1` a check failed (the lines are still printed, and stderr names the failed check), `2` setup failed (no result lines). Each demo can be rerun right away. Measured on a fresh clone with empty volumes and only the variables above, each demo twice.
+
+`docker-compose.yml` names its project `m_api`, so a clone in another folder still uses the same containers and volumes. To run a second copy beside an existing one (fresh volumes, the dev data untouched), stop the first one and `export COMPOSE_PROJECT_NAME=<another name>` before the block; `docker compose down -v` then removes only that copy's volumes.
+
+### HW#22 grading (historical): outbox and idempotency
+
+HW#22 as graded, for the record. On this branch the env schema also requires `REDIS_CACHE_URL` and `REDIS_QUEUE_URL` (the relay and the consumer validate it too), so export them as in the block above. From a fresh clone, in the repository root (where `package.json` is). Nothing needs to be running but Docker: each demo builds, applies pending migrations, sets up the RabbitMQ topology and starts its own relay and consumer (see [The demos](#the-demos)).
 
 The scripts normally load credentials from the local store through `scripts/with-secrets.sh`. A fresh clone has no store, so the values come from the environment (`SKIP_VAULT=1`). They're the dev-only bootstrap accounts committed in [docker-compose.yml](docker-compose.yml), [init.sql](init.sql) and [pgbouncer/userlist.txt](pgbouncer/userlist.txt), not secrets:
 - `DB_URL`: the app's connection, `app_user` through PgBouncer. The app ignores any password in it and reads `secrets/db_password` (gitignored), so the block creates that file.
@@ -763,7 +803,7 @@ The relay publishes, waits for the broker's confirm, and only then sets `publish
 
 - **`npm run outbox:cleanup`** ([src/cleanup-outbox.ts](src/cleanup-outbox.ts)) deletes outbox rows published more than 7 days ago. Waiting and parked rows are never deleted. Meant to run periodically (cron, like `backup.cron`); safe to run any time.
 - **At a larger volume:** partition `outbox` by `created_at` (e.g. daily) and drop old partitions instead of deleting rows: no dead tuples, no vacuum work. The partial index keeps the relay's scan as small as the backlog either way.
-- **`processed_messages`** grows by one row per event per consumer. The plan: delete rows older than any redelivery could be (e.g. 30 days). A duplicate arriving later still meets the natural key `invoices.order_id`. Not scripted yet.
+- **`npm run processed-messages:cleanup`** ([src/cleanup-processed-messages.ts](src/cleanup-processed-messages.ts)) deletes `processed_messages` rows older than 30 days, far beyond any redelivery (the relay retries within minutes, a DLQ'd message is replayed by hand within days). A duplicate arriving even later still meets the natural key `invoices.order_id` and is skipped (`order already invoiced`). Same schedule as the others.
 - **`idempotency_keys`:** `npm run idempotency:cleanup`, 24 h (see [level 3](#idempotency-key-at-the-api-edge-level-3)).
 
 ### Carried over from earlier phases
@@ -772,6 +812,108 @@ The relay publishes, waits for the broker's confirm, and only then sets `publish
 - **Debezium's column names:** the outbox uses snake_case (`aggregate_type`, `aggregate_id`); a move to CDC would set `route.by.field=aggregate_type` and `table.field.event.key=aggregate_id`.
 - **`user_id` comes from the request body,** since the API has no auth. In a real app it comes from the auth token, and so does the Idempotency-Key's scope.
 - **The `order.placed` v1 → v2 transition:** in dev the queue was purged; in production, deploy the reader that accepts both versions first, then switch the producer to v2.
+
+## Redis: кеш, сесії, ліміти, черга (HW#23: cache, sessions, rate limit, queue)
+
+Redis does four jobs here: a cache for the product card, the store for sessions, the counters of the rate limit, and the BullMQ job queue. They run on **two Redis instances**, because the jobs want opposite things when memory runs out.
+
+### Two instances
+
+| Instance | Port (127.0.0.1) | Settings | Holds |
+|---|---|---|---|
+| `redis-cache` | 21115 | `maxmemory 32mb`, `allkeys-lru`, no persistence (`--save ""`, `--appendonly no`) | the product cards, the stampede locks |
+| `redis-queue` | 21116 | `maxmemory 256mb`, `noeviction`, AOF `everysec`, on a volume | BullMQ jobs, sessions, rate-limit counters |
+
+- **The cache may lose anything, the queue nothing.** A cache entry is rebuilt from Postgres, so when memory is full the cache should drop the least recently used key (`allkeys-lru`) and keep accepting writes. A job, a session or a counter can't be rebuilt, so the queue instance refuses new writes instead (`noeviction`, clean OOM errors), and BullMQ requires that: it warns `IMPORTANT! Eviction policy is allkeys-lru. It should be "noeviction"` otherwise.
+- **The policy belongs to the whole instance.** `maxmemory` and `maxmemory-policy` are per instance; `SELECT 1` on the cache still reports `allkeys-lru` (measured), so two databases on one instance would separate nothing.
+- **`maxmemory` is what makes the policy work:** without it nothing is ever "full", so `allkeys-lru` never evicts, and the process is killed when the machine runs out of RAM instead. Measured on the cache with 50 000 × 1 KB writes: under `noeviction`, 24 154 succeeded and 25 846 got `OOM command not allowed`; under `allkeys-lru`, all 50 000 succeeded and 25 938 keys were evicted. After a restart, a probe key was gone on the cache and still there on the queue.
+- **One place creates the clients** ([src/redis/redis-clients.ts](src/redis/redis-clients.ts)), each tuned for its job: the cache and rate-limit clients fail fast (200 ms, no offline queue, no retries); the sessions client the same with 500 ms; the BullMQ producer fails fast; the BullMQ worker waits for Redis (`maxRetriesPerRequest: null`).
+
+### Cache-aside: the product card
+
+`GET /products/{id}/card` returns a product with its sales aggregates (units, orders, buyers, revenue, the last 30 days, and the 3 products most often bought with it: a self-join of `order_items`). [`cacheAside`](src/redis/cache-aside.ts) reads `product:card:{id}:v1` from Redis; on a miss it runs the query and stores the card with `SET … EX`.
+
+- **TTL with jitter:** 300 s + 0–60 s, so cards warmed together don't expire together. 50 warmed keys: TTLs 301–360 s, 31 distinct values; without the jitter, 1.
+- **The version in the key** (`:v1`) retires every cached card at once when the card's shape changes.
+- **The cache can't fail a request:** a failed read is a miss, a failed write (OOM, Redis down) is logged once and the card still returned. Without that guard, a full cache answered `500`.
+- **Staleness is accepted:** stock and sales change on every checkout, and invalidating there would empty the cache for exactly the hot products. The card can be up to ~6 minutes old (the OpenAPI description says so); checkout's transaction checks the real stock, so nothing is oversold. A price changed directly in the database stayed wrong on the card until its TTL ended, which is why every key has one.
+- **Not found isn't cached**, so a product created later shows up at once; every request for a missing id reaches the database.
+- **Measured:** miss 4.6 ms, hit 1.4 ms (medians of 20; the first cold miss 14.8 ms). The dev data is small, so the gap is small; the miss grows with the order history, a hit stays one `GET`.
+
+### The stampede lock (single flight)
+
+When a card expires, many requests miss at the same moment. Now only one of them (the leader) loads it: `SET lock:<key> <token> NX PX 3000`. The leader re-reads the cache first (a leader that just finished may have stored it), loads, stores, and releases with `DELEX … IFEQ <token>`, which deletes the lock only if it's still its own. The others (waiters) re-check every 25 ms + 0–25 ms of jitter until the card appears, give up after 3.5 s (longer than the lock's 3 s), and load at once if the lock is gone with nothing stored (a missing product). If Redis itself fails, nobody waits.
+
+- **Measured:** 50 concurrent reads of a key that just disappeared, 10 rounds: **1 database call every round** (1 leader, 49 waiters). Without the lock: 25 calls for 25 readers. Without the leader's re-check (and callers reaching the lock 0–40 ms late): 6–11 calls per round. Releasing with another caller's token: `DELEX IFEQ` keeps the lock, a plain `DEL` removes it.
+
+**If the lock breaks.** The lock can fail: it can expire under a slow leader, be evicted under memory pressure (it lives on the LRU cache), or be lost with a Redis failover. Then two requests both become leaders and run the same query twice. That costs one extra query, a few cents, and corrupts nothing, because both write the same card. **This lock protects efficiency, not correctness.** The same `SET NX PX` guarding a business invariant (taking payment once, not overselling stock) would be a different matter: a lock that can silently fail would let two writers through and leave corrupted state. That's why the invariants here are protected by the database instead: checkout's transaction with a guarded `UPDATE … WHERE stock >= :quantity`, unique constraints (`invoices.order_id`, `idempotency_keys`), and idempotent handlers. The deliberate failure is the evidence: without the lock, 25 database calls instead of 1, and the same correct card in every response.
+
+### Sessions
+
+`POST /sessions` (a stand-in for login) stores `sess:<id>` with a 30-minute TTL and returns the id only in the `sid` cookie (`HttpOnly`, `SameSite=Lax`, `Secure` in production). Every request with the cookie runs `GETEX sess:<id> EX 1800`, reading the session and restarting its timer in one command, so an active user is never logged out; a 7-day cap stored inside the session ends even an always-active one. The id is 32 random bytes, so it needs no signature. A new id at every login prevents session fixation.
+
+- **Sessions live on the queue instance**, never on the cache: `allkeys-lru` would eventually evict a session under memory pressure and log that user out, in a way nobody can reproduce. Measured with sessions pointed at the cache and 50 000 cold keys: 25 907 keys evicted, the session among them, `GET /session` → 401.
+- **Only login creates a key:** 20 requests without a cookie create none.
+- **An expired or unknown session → 401**, and the cookie is cleared; **Redis unreachable → 503**, never 401, so an outage doesn't look like a logout (its own client, 500 ms).
+- **Measured:** the TTL dropped from 1800 to 1798 in 2 s and was back to 1800 after one request; the session survived an API restart. With process memory instead of Redis, it was gone after the restart; without the renewal, the TTL only went down.
+
+### Rate limit
+
+`GET /products/{id}/card` and `POST /orders` allow **5 requests per 10 s per client** (the session's user, otherwise the IP), then answer `429` with `Retry-After`. The counter is a **sliding window** (a Redis sorted set updated by one Lua script on `redis-queue`), chosen because it's exact with no bursts at a window boundary, so every instance together lets through exactly the limit; the cost, one stored entry per allowed request, is tiny at 5 per 10 s.
+
+- **One script, Redis's clock:** counting and adding happen atomically (a split script let 18 and 22 of 50 concurrent requests through), and the time comes from Redis's `TIME`, so instances with different clocks share one window.
+- **On the queue instance:** an evicted counter would hand its client a fresh allowance.
+- **`Retry-After`** is computed from the oldest entry in the window, not guessed.
+- **Fail open:** when Redis doesn't answer, requests pass (logged once). While Redis is slow, each limited request first waits the client's 200 ms timeout. `POST /orders` fails open too, deliberately.
+- **Measured:** a burst of 50 over two instances: exactly 5 × 200 and 45 × 429. With an in-memory limiter per instance: 10 allowed, no 429.
+
+### The jobs queue (BullMQ)
+
+One queue, `jobs`, on `redis-queue`, with a separate worker process (`npm run worker`, through `scripts/with-secrets.sh`; SIGTERM lets the jobs in progress finish). Two kinds of job:
+- **`invoice-email`** for each order. Sending is faked as a row in `invoice_emails`, whose primary key (`order_id`) makes the handler idempotent: a job that runs twice sends once.
+- **`cleanup`**, the retention cleanups (idempotency keys, published outbox rows, old inbox rows), from a scheduler with a fixed id, `cleanup-daily`, at `0 3 * * *`. The app upserts it at every start, so restarts never add copies. `CLEANUP_EVERY_MS` sets a short interval for a demo.
+
+The decisions:
+- **Jobs are added from the order.placed consumer, not after the checkout commit.** Adding after the commit would be a dual write: a crash between the commit and `queue.add()` would lose the email. From the consumer, the job is backed by the outbox. It's added after the invoice commit and before the ack, for every outcome, a skipped duplicate too, so a crash between the commit and the add is covered by the redelivery; the job id `invoice-email-<orderId>` makes a second add a no-op.
+- **`removeOnComplete: { age: 7 days }` keeps deduplication working.** A job id counts as a duplicate only while its job exists; `removeOnComplete: true` deleted it at once and let the same id run a second time (measured). Failed jobs are kept 30 days, and the worker logs every failure.
+- **Retries:** 5 attempts, exponential from 1 s with jitter. Measured: a job failing twice ran 3 times, with pauses of 0.88 s then 1.65 s, and completed.
+- **Redis down while adding a job → `nack`, not `reject`.** The invoice is already committed and the message is fine, but on RabbitMQ 4.3 `reject` counts toward the delivery limit of 5, so a long Redis outage would have dead-lettered valid events. Measured: 40 s without Redis, 7 requeues, delivery count still 0, DLQ 0; after Redis came back, the email was sent.
+- **Send, then record, so at-least-once:** a worker killed mid-send leaves no row, and the rerun sends (measured: stalled after ~60 s, then sent once). A worker that dies between a real provider's call and the insert would make the provider send twice, so with a real provider `invoice-email-<orderId>` goes with the request as its idempotency key, and the provider deduplicates.
+
+### The demos
+
+Each demo builds first, applies pending migrations, creates its own data and deletes it at the end, prints exactly `key=value` lines on stdout (logs on stderr), and exits `0` (every check held), `1` (a check failed) or `2` (setup failed). Each can be run twice in a row.
+
+| Demo | Output | Takes, with the build |
+|---|---|---|
+| `demo:cache` | `cache-lru=1` `cache-maxmemory=1` `warmed=50` `ttl-distinct=33` `concurrent=25` `db-calls=1` `db-calls-warm=0` | ~3 s |
+| `demo:session` | `requests=3` `sessions=1` `in-redis=1` `ttl-renewed=1` | ~5 s |
+| `demo:ratelimit` | `instances=2` `limit=5` `requests=10` `allowed=5` `blocked=5` `status=429` `retry-after=1` | ~3 s |
+| `demo:queue` | `queue-noeviction=1` `attempts=3` `completed=1` `added=2` `queued=1` `schedulers=1` `scheduled-runs=4` | ~7 s |
+
+`ttl-distinct` and `scheduled-runs` vary a little between runs (31–38, 3–4).
+
+- **`demo:cache`** runs the card service in its own process (the database-call counter counts per process, and HTTP would hit the rate limit). The key disappears by a real eviction, not a `DEL`: it floods 1 KB cold keys into a namespace of its own run (`cold:<runId>:…`) until LRU removes one of the 50 warmed cards (after ~24 000 keys), then fires 25 concurrent reads at it.
+- **`demo:session`** starts the API in its process: a login, three requests with the cookie, the last one after 1.5 s; the TTL goes from 1798 to 1800.
+- **`demo:ratelimit`** starts two API instances (each with its own limiter and Redis client) and alternates 10 requests (2 × the limit) between them: the count at which two limiters counting alone would allow all 10. It deletes its own counter (`ip:127.0.0.1`) before and after.
+- **`demo:queue`** uses a queue of its own run (`jobs-demo-<runId>`, obliterated at the end) with an in-process worker, so a dev worker can't take its jobs and the real scheduler is never touched.
+
+**Each demo catches its broken counterpart** (measured, each restored afterwards):
+
+| Broken on purpose | Demo | Result |
+|---|---|---|
+| no TTL jitter | `demo:cache` | `ttl-distinct=1`, exit 1 |
+| no stampede lock | `demo:cache` | `db-calls=25`, exit 1 |
+| no session renewal (`GET` instead of `GETEX`) | `demo:session` | `ttl-renewed=0`, exit 1 |
+| an in-memory limiter per instance | `demo:ratelimit` | `allowed=10 blocked=0`, no 429, exit 1 |
+| the queue on the cache instance | `demo:queue` | `queue-noeviction=0`, exit 1 |
+
+### Production notes
+
+- **Access:** the dev instances have no password and listen on 127.0.0.1 only; production would put Redis on a private network with `AUTH` or ACLs (a user per service, limited to its commands and keys), the credentials only in the vault.
+- **Sizing:** 32 MB (cache) and 256 MB (queue) are dev settings a demo fills in seconds. Production sizes the cache from the hot set's real size, and the queue from the largest backlog it must hold (e.g. workers down for an hour) plus the sessions, with an alert well before the limit.
+- **`POST /sessions` is a stand-in:** it opens a session for any `user_id` with no credentials. Real login replaces it in HW#24; never ship it.
+- **Behind a proxy:** the rate limit's IP is the socket's (`trust proxy` off); behind a load balancer it must be set to the proxy's hop count, or every client shares the proxy's limit.
 
 ## Database: schema, seed, indexes
 
@@ -1050,11 +1192,15 @@ Environment variables are validated on startup by [src/config/env.schema.ts](src
 | `DB_URL`                     | `.env`                   | the app, `demo:race`, `demo:workers`, `demo:retry` |
 | DB password (not an env var) | `secrets/db_password`    | the app and the same three demos                   |
 | `MIGRATIONS_DB_URL`          | `.secrets/infisical.env` | `migrate*`, `seed`, `demo:nplus1`, `report`        |
+| `REDIS_CACHE_URL`, `REDIS_QUEUE_URL` | `.secrets/infisical.env` | the app, the relay, the consumer      |
 
 - **`PORT`:** the port the HTTP server listens on. Template for `.env`: `.env.example`.
 - **`DB_URL`:** Postgres connection string (`postgres://user@host:port/database`), pointing at PgBouncer (`localhost:21111`), not Postgres — see [PgBouncer](#pgbouncer). Any password segment is ignored — a password embedded in an env var can't be rotated without a restart, which defeats the point below, so the pool always gets its password from `secrets/db_password` instead.
 - **DB password:** a gitignored secret file (HW#11), rotated by `rotate.sh`. Read fresh on every new connection, so the password rotates without a restart. See [Database password](#database-password).
 - **`MIGRATIONS_DB_URL`:** connection string for the TypeORM CLI and DB scripts, as the schema owner (migrations run DDL, which `app_user` can't). Loaded by `scripts/with-secrets.sh` from the gitignored store. Not read by the app, so it isn't in `.env.example` — `check:env` would reject it. See [DB scripts and secrets](#db-scripts-and-secrets).
+- **`REDIS_CACHE_URL`, `REDIS_QUEUE_URL`:** the two Redis instances (HW#23), `redis-cache` on 127.0.0.1:21115 and `redis-queue` on 127.0.0.1:21116. The dev instances have no password and listen on 127.0.0.1 only; production would put Redis on a private network with `AUTH` or ACLs (a user per service, limited to its commands and keys), with the credentials only in the vault.
+- **Sessions and the rate limit (HW#23):** both on `redis-queue`; see [the Redis section](#redis-кеш-сесії-ліміти-черга-hw23-cache-sessions-rate-limit-queue). `POST /sessions` is a stand-in until real login in HW#24: **never ship it.**
+- **`CLEANUP_EVERY_MS`** (optional, `.env.example`): the BullMQ cleanup scheduler runs daily at 03:00; a number of ms (at least 1000) makes it run that often instead, for a demo only.
 
 Copy [.env.example](.env.example) to `.env` and adjust as needed:
 
