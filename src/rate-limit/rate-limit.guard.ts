@@ -11,7 +11,8 @@ import {
   HttpStatus,
   Injectable,
 } from '@nestjs/common';
-import type { Request, Response } from 'express';
+import type { Response } from 'express';
+import type { AuthenticatedRequest } from '../auth/current-user.decorator.js';
 import { errorText, warnOnce } from '../redis/warn-once.js';
 import { sessionOf } from '../sessions/session.middleware.js';
 import { RateLimiter } from './rate-limiter.js';
@@ -26,7 +27,7 @@ export class RateLimitGuard implements CanActivate {
     const http = context.switchToHttp();
     const res = http.getResponse<Response>();
     const route = `${context.getClass().name}.${context.getHandler().name}`;
-    const key = `rl:${route}:${clientOf(http.getRequest<Request>(), res)}`;
+    const key = `rl:${route}:${clientOf(http.getRequest<Partial<AuthenticatedRequest>>(), res)}`;
 
     let result;
     try {
@@ -47,12 +48,15 @@ export class RateLimitGuard implements CanActivate {
   }
 }
 
-// The session's user when there is one (set by SessionMiddleware, which runs before
-// guards), otherwise the IP. req.ip is the socket's address: 'trust proxy' is off
+// Who the client is, most reliable first: the access token's user (set by the global
+// AccessTokenGuard, which runs before this route guard; a client can't pick it), then
+// the cookie session's user (SessionMiddleware runs before guards), otherwise the IP.
+// The same "user:<id>" either way, so one user has one counter per route. req.ip is the socket's address: 'trust proxy' is off
 // because nothing sits in front of the app, so a client can't pick its own IP with
 // X-Forwarded-For. Behind a proxy, set 'trust proxy' to that proxy's hop count, or
 // every client shares the proxy's limit.
-function clientOf(req: Request, res: Response): string {
+function clientOf(req: Partial<AuthenticatedRequest>, res: Response): string {
+  if (req.user) return `user:${req.user.id}`;
   const session = sessionOf(res);
   if (session.state === 'active') return `user:${session.data.userId}`;
   return `ip:${req.ip ?? 'unknown'}`;

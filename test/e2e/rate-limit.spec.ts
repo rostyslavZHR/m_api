@@ -13,6 +13,7 @@ import { createTestApp } from '../integration/testkit/app.js';
 import { aProduct, aUser } from '../integration/testkit/builders.js';
 import { startTestDatabase, type TestDatabase } from '../integration/testkit/postgres.js';
 import { startTestQueue, type TestRedis } from '../integration/testkit/redis.js';
+import { accessTokenFor, bearer } from '../integration/testkit/tokens.js';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const { limit } = RATE_LIMIT;
@@ -109,12 +110,14 @@ describe('Rate limit (e2e)', () => {
 
   it('POST /orders has its own counter, with the same limit', async () => {
     const { user, cookie } = await loggedInUser();
+    const token = await accessTokenFor({ id: user.id });
     const order = () =>
       request(app.getHttpServer())
         .post('/orders')
         .set('Cookie', cookie)
+        .set('Authorization', bearer(token))
         .set('Idempotency-Key', randomUUID())
-        .send({ user_id: Number(user.id), items: [{ product_id: Number(product.id), quantity: 1 }] });
+        .send({ items: [{ product_id: Number(product.id), quantity: 1 }] });
 
     for (let i = 0; i < limit; i++) await card(app, cookie).expect(200);
     for (let i = 0; i < limit; i++) await order().expect(201);

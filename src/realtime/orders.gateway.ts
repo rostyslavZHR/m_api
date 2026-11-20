@@ -1,4 +1,4 @@
-import { Logger, type OnModuleDestroy } from '@nestjs/common';
+import { Inject, Logger, type OnModuleDestroy } from '@nestjs/common';
 import {
   ConnectedSocket,
   MessageBody,
@@ -10,6 +10,9 @@ import {
 import type { Subscription } from 'rxjs';
 import type { DefaultEventsMap, Namespace, Socket } from 'socket.io';
 import { z } from 'zod';
+import { VERIFICATION_KEYS } from '../auth/access-token.guard.js';
+import { TokenDenylist } from '../auth/denylist.js';
+import { type AuthUser, verifyAccessToken, type VerificationKeys } from '../auth/tokens.js';
 import type { OrderStatus } from '../entities/index.js';
 import { OrderEventsBus } from '../order-events/order-events.bus.js';
 import { OrdersService } from '../orders/orders.service.js';
@@ -33,9 +36,9 @@ type OrdersNamespace = Namespace<
   SocketData
 >;
 
-// Handshake `auth`: a trusted claim until real auth. ids are bigint in the DB;
-// int() already caps them at Number.MAX_SAFE_INTEGER, far inside bigint's range.
-const Handshake = z.object({ userId: z.number().int().positive() });
+// Handshake `auth`: the same access token the HTTP routes take (io(url, { auth:
+// { token } })). The user id comes from the verified token, never from the client.
+const Handshake = z.object({ token: z.string().min(1) });
 
 // The validator doesn't cover WebSocket messages, so payloads are checked here.
 const JoinPayload = z.strictObject({ orderId: z.number().int().positive() });
@@ -63,17 +66,35 @@ export class OrdersGateway implements OnGatewayInit, OnModuleDestroy {
   constructor(
     private readonly bus: OrderEventsBus,
     private readonly ordersService: OrdersService,
+    @Inject(VERIFICATION_KEYS) private readonly keys: VerificationKeys,
+    private readonly denylist: TokenDenylist,
   ) {}
 
   // Runs once, before any client connects.
   afterInit(server: OrdersNamespace): void {
-    // Checked before the connection exists: a bad handshake gets connect_error.
-    // Identity lives in socket.data from here on, never in message bodies.
+    // Authentication, before the connection exists: no token, or one that fails the
+    // same checks as on HTTP (signature, ES256, iss, aud, exp, kid) → connect_error
+    // "unauthorized". The HTTP guard doesn't run for WebSocket connections, so this
+    // is the socket's only check. Identity lives in socket.data from here on, never
+    // in message bodies.
     server.use((socket, next) => {
       const parsed = Handshake.safeParse(socket.handshake.auth);
       if (!parsed.success) return next(new Error('unauthorized'));
-      socket.data.userId = parsed.data.userId;
-      next();
+      this.authenticate(parsed.data.token).then(
+        (user) => {
+          socket.data.userId = Number(user.id);
+          // A socket outlives its handshake: close it when the token expires, so a
+          // connection never lasts longer than the token that opened it.
+          const expiry = setTimeout(() => socket.disconnect(true), Math.max(0, user.exp * 1000 - Date.now()));
+          socket.once('disconnect', () => clearTimeout(expiry));
+          next();
+        },
+        (error: { code?: string }) => {
+          // The reason, never the token.
+          this.logger.warn(`socket handshake rejected: ${error.code ?? 'ERR_UNKNOWN'}`);
+          next(new Error('unauthorized'));
+        },
+      );
     });
 
     // One bus subscription for the gateway's lifetime. Per connection, each event
@@ -84,6 +105,14 @@ export class OrdersGateway implements OnGatewayInit, OnModuleDestroy {
       .subscribe((event) =>
         this.server.to(room(event.orderId)).emit('order.status', event),
       );
+  }
+
+  // The same two checks as the HTTP guard: the token verifies, and it isn't on the
+  // denylist (logout, reuse). Fail closed: a Redis error rejects the handshake too.
+  private async authenticate(token: string): Promise<AuthUser> {
+    const user = await verifyAccessToken(token, this.keys);
+    if (await this.denylist.isDenied(user)) throw Object.assign(new Error('denylisted'), { code: 'DENYLISTED' });
+    return user;
   }
 
   onModuleDestroy(): void {

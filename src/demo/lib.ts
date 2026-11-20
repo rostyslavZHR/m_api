@@ -26,6 +26,7 @@ import {
 // Well above a normal run (~4 s), and above the inner waits added up (ready 10 s +
 // settle 10 s + depth reads), so a slow machine fails a check, not the deadline.
 const DEADLINE_MS = 60_000;
+const CLEANUP_GRACE_MS = 5_000;
 const CONSUMER_ENTRY = fileURLToPath(
   new URL('../consumer/main.js', import.meta.url),
 );
@@ -90,20 +91,59 @@ export const checker = () => {
   };
 };
 
-// Runs one demo: the overall deadline, exit codes, and cleanup whatever happens.
-// `demo` returns whether its checks held, and registers through `onCleanup` what
-// it opened, to be closed in reverse order.
+// HTTP status contracts (the HW#24 demos): each step prints key=status at once, and a
+// status outside the expected ones is named on stderr (INVARIANT key: expected …,
+// got …). `held()` is false if any step broke its invariant.
+export const statusContract = () => {
+  const broken: string[] = [];
+  return {
+    step: (key: string, status: number, ...expected: number[]) => {
+      printResults([[key, status]]);
+      if (!expected.includes(status)) {
+        broken.push(key);
+        writeSync(2, `INVARIANT ${key}: expected ${expected.join(' or ')}, got ${status}\n`);
+      }
+    },
+    held: () => broken.length === 0,
+  };
+};
+
+// Runs one demo: the overall deadline, exit codes, and cleanup whatever happens,
+// Ctrl+C and SIGTERM included (exit 130 / 143 after the cleanup). `demo` returns
+// whether its checks held, and registers through `onCleanup` what it opened, to be
+// closed in reverse order.
 export async function runDemo(
   name: string,
   demo: (onCleanup: (fn: () => Promise<void>) => void) => Promise<boolean>,
 ): Promise<never> {
   const started = Date.now();
   const cleanups: (() => Promise<void>)[] = [];
+  // Once, whoever asks first (the normal end or a signal).
+  let cleaning: Promise<void> | undefined;
+  const cleanUp = () =>
+    (cleaning ??= (async () => {
+      killChildren();
+      for (const cleanup of [...cleanups].reverse()) {
+        await cleanup().catch(() => {});
+      }
+    })());
+  // Off the normal path (the deadline, a signal): clean up, but never wait more than
+  // CLEANUP_GRACE_MS for it, so a hanging cleanup can't keep the process alive.
+  const abort = (code: number) => {
+    setTimeout(() => process.exit(code), CLEANUP_GRACE_MS).unref();
+    void cleanUp().then(() => process.exit(code));
+  };
   const deadline = setTimeout(() => {
     log(`${name}: no result within ${DEADLINE_MS / 1000} s, giving up`);
-    killChildren();
-    process.exit(2);
+    abort(2);
   }, DEADLINE_MS);
+  for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143]] as const) {
+    process.once(signal, () => {
+      log(`${name}: ${signal}, cleaning up`);
+      clearTimeout(deadline);
+      abort(code);
+    });
+  }
 
   let code: number;
   try {
@@ -114,10 +154,7 @@ export async function runDemo(
     code = 2;
   }
   clearTimeout(deadline);
-  killChildren();
-  for (const cleanup of cleanups.reverse()) {
-    await cleanup().catch(() => {});
-  }
+  await cleanUp();
   process.exit(code);
 }
 

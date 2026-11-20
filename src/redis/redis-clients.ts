@@ -41,17 +41,7 @@ export const createWorkerClient = (url: string): Redis =>
 // never a 401, so a Redis blip doesn't look like a logout.
 export const SESSION_COMMAND_TIMEOUT_MS = 500;
 
-export const createSessionClient = (url: string): Redis =>
-  named(
-    new Redis(url, {
-      commandTimeout: SESSION_COMMAND_TIMEOUT_MS,
-      enableOfflineQueue: false,
-      maxRetriesPerRequest: 0,
-      connectTimeout: 1_000,
-      connectionName: 'm_api:sessions',
-    }),
-    'sessions',
-  );
+export const createSessionClient = (url: string): Redis => failFast(url, 'sessions', SESSION_COMMAND_TIMEOUT_MS);
 
 // Rate-limit counters live on the queue instance too (noeviction: on the cache an
 // evicted counter would hand its client a fresh allowance), with their own
@@ -59,17 +49,32 @@ export const createSessionClient = (url: string): Redis =>
 // doesn't answer the guard lets the request through, so it must give up quickly.
 export const RATE_LIMIT_COMMAND_TIMEOUT_MS = 200;
 
-export const createRateLimitClient = (url: string): Redis =>
-  named(
+export const createRateLimitClient = (url: string): Redis => failFast(url, 'rate-limit', RATE_LIMIT_COMMAND_TIMEOUT_MS);
+
+// The access-token denylist (HW#24) lives on the queue instance (noeviction: on the
+// LRU cache an evicted entry would make a revoked token valid again), with its own
+// fail-fast client: the guard checks it on every protected request, and when Redis
+// doesn't answer the guard refuses the request (fail closed), so it must give up
+// quickly.
+export const DENYLIST_COMMAND_TIMEOUT_MS = 200;
+
+export const createDenylistClient = (url: string): Redis => failFast(url, 'denylist', DENYLIST_COMMAND_TIMEOUT_MS);
+
+// The fail-fast profile shared by the request-path clients: a command gets
+// commandTimeout ms, nothing queues while the connection is down, nothing retries.
+// The caller decides what an error means (a miss, a 503, fail open or closed).
+function failFast(url: string, name: string, commandTimeout: number): Redis {
+  return named(
     new Redis(url, {
-      commandTimeout: RATE_LIMIT_COMMAND_TIMEOUT_MS,
+      commandTimeout,
       enableOfflineQueue: false,
       maxRetriesPerRequest: 0,
       connectTimeout: 1_000,
-      connectionName: 'm_api:rate-limit',
+      connectionName: `m_api:${name}`,
     }),
-    'rate-limit',
+    name,
   );
+}
 
 // Without a listener ioredis prints every reconnect error as "Unhandled error
 // event"; one line per distinct error is enough.

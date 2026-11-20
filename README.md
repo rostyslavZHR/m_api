@@ -6,7 +6,46 @@
 
 ## Grading
 
-HW#23 (Redis: кеш, сесії, ліміти, черга). From a fresh clone, in the repository root (where `package.json` is). Nothing needs to be running but Docker: each demo builds, applies pending migrations, and creates and removes its own data (see [the Redis section](#redis-кеш-сесії-ліміти-черга-hw23-cache-sessions-rate-limit-queue)).
+HW#24 (authentication: JWT, refresh, logout, roles and ownership). From a fresh clone, in the repository root (where `package.json` is). Nothing needs to be running but Docker: each demo builds, applies pending migrations, starts the app in its own process on a random port, creates its own users (and, in `demo:rbac`, a product and an order), and deletes them at the end, Ctrl+C included. See [Auth](#auth).
+
+What the block sets, and why:
+- **`COMPOSE_PROJECT_NAME`:** a separate Compose project, so the clone gets fresh volumes and `docker compose down -v` can never touch another copy's data. The host ports are fixed, so stop any other running copy first.
+- **The five URLs:** the dev-only bootstrap accounts committed in [docker-compose.yml](docker-compose.yml), [init.sql](init.sql) and [pgbouncer/userlist.txt](pgbouncer/userlist.txt), not secrets. The env schema requires all five at startup. `DB_URL` is `app_user` through PgBouncer; the app reads its password from `secrets/db_password` (gitignored), so the block creates that file. `MIGRATIONS_DB_URL` is the schema owner (migrations, and the demos' fixtures and cleanup).
+- **`SKIP_VAULT=1`:** a fresh clone has no secrets store, so [scripts/with-secrets.sh](scripts/with-secrets.sh) takes the values from the environment.
+- **The JWT keys, generated on the spot** by [scripts/generate-jwt-keys.mjs](scripts/generate-jwt-keys.mjs): an EC P-256 pair (ES256), both base64 of their PEM, and a 32-byte pepper. The app refuses an RSA key, a kid that isn't `<env>-<yyyy>-<mm>` and a pepper under 32 characters, and names the variable. Nothing is printed; the keys live only in this shell.
+
+```bash
+export COMPOSE_PROJECT_NAME=m_api_grading
+docker compose up -d --wait
+
+export DB_URL=postgres://app_user@localhost:21111/shop
+export MIGRATIONS_DB_URL=postgres://admin:admin-bootstrap-only@localhost:21110/shop
+export RABBITMQ_URL=amqp://app:rabbitmq-dev-only@127.0.0.1:21113
+export REDIS_CACHE_URL=redis://127.0.0.1:21115
+export REDIS_QUEUE_URL=redis://127.0.0.1:21116
+export SKIP_VAULT=1
+mkdir -p secrets && printf 'app-v1-password' > secrets/db_password
+eval "$(node scripts/generate-jwt-keys.mjs grader | sed 's/^/export /')"
+export JWT_KID=grader-2026-11
+
+npm ci
+
+npm run demo:auth; echo "exit=$?"
+npm run demo:reuse; echo "exit=$?"
+npm run demo:rbac; echo "exit=$?"
+```
+
+| Demo | stdout (these lines, one per line) | Takes, with the build |
+|---|---|---|
+| `demo:auth` | `login=200` `no-token=401` `with-token=200` `refresh=200` `logout=204` `after-logout=401` `refresh-after-logout=401` | ~4 s |
+| `demo:reuse` | `login=200` `r1-refresh=200` `r1-reuse=401` `r2-after-reuse=401` | ~4 s |
+| `demo:rbac` | `anon=401` `own=200` `foreign=403` `role-denied=403` `role-allowed=201` `tampered=401` | ~5 s |
+
+`demo:auth` logs out with the access token from the refresh (A2), then checks that A2 and the newest refresh token (R2). In `demo:rbac`, `tampered` is a customer's access token with `role` changed to `admin` and the old signature, sent to `POST /products`. Exit codes: `0` every line as expected, `1` an invariant broke (the line is still printed, and stderr says `INVARIANT <key>: expected …, got …`), `2` setup failed. Each demo can be rerun right away and prints the same lines. Measured on a fresh clone with empty volumes and only the variables above, each demo twice. Afterwards: `docker compose down -v` (with the same `COMPOSE_PROJECT_NAME`) removes that copy's containers and volumes.
+
+### HW#23 grading (historical): Redis
+
+HW#23 (Redis: кеш, сесії, ліміти, черга), as graded. Since HW#24 the app also needs the four JWT variables, so run it after the HW#24 block's exports. From a fresh clone, in the repository root (where `package.json` is). Nothing needs to be running but Docker: each demo builds, applies pending migrations, and creates and removes its own data (see [the Redis section](#redis-кеш-сесії-ліміти-черга-hw23-cache-sessions-rate-limit-queue)).
 
 The scripts normally load credentials from the local store through `scripts/with-secrets.sh`. A fresh clone has no store, so the values come from the environment (`SKIP_VAULT=1`). They're the dev-only bootstrap accounts committed in [docker-compose.yml](docker-compose.yml), [init.sql](init.sql) and [pgbouncer/userlist.txt](pgbouncer/userlist.txt), not secrets. The env schema requires all five URLs at startup, and `demo:session` and `demo:ratelimit` start the whole app, so all five are exported:
 - `DB_URL`: the app's connection, `app_user` through PgBouncer. The app ignores any password in it and reads `secrets/db_password` (gitignored), so the block creates that file.
@@ -126,7 +165,7 @@ Acceptance checks with this repo's values (dev-only passwords, committed in [ini
 
 `pg_restore --list` runs in the container on purpose: the archive is from Postgres 16, and a host `pg_restore` older than 16 rejects it (`unsupported version (1.15) in file header`).
 
-The row counts are `11|11|60|120` after the first seed and after the second — 10 users plus the underfunded one, 10 products plus the race product. Each demo prints its checks and exits non-zero if any fails; each resets its own preconditions, so it can be rerun. `demo:race`, `demo:workers` and `demo:retry` connect like the app does — as `app_user`, through PgBouncer on 21111 (`DB_URL` from `.env`, password from `secrets/db_password`) — see [PgBouncer](#pgbouncer).
+The row counts are `15|11|60|120` after the first seed and after the second — 10 users plus the underfunded one plus the 4 login accounts (HW#24), 10 products plus the race product. Each demo prints its checks and exits non-zero if any fails; each resets its own preconditions, so it can be rerun. `demo:race`, `demo:workers` and `demo:retry` connect like the app does — as `app_user`, through PgBouncer on 21111 (`DB_URL` from `.env`, password from `secrets/db_password`) — see [PgBouncer](#pgbouncer).
 
 Optional: `DEMO_COMPARE=1 npm run demo:workers` and `DEMO_COMPARE=1 npm run demo:retry` add the contrast runs — the same work without `SKIP LOCKED`, and under `READ COMMITTED` — see [Concurrency](#concurrency).
 
@@ -173,6 +212,8 @@ grep -rnE "PACT_BROKER_TOKEN[\"']?[[:space:]]*[:=][[:space:]]*[\"'][^\"'$]" --in
 | No literal token | the `PACT_BROKER_TOKEN` grep above → no output |
 
 ### HW#18: real-time order status (historical)
+
+> **As graded in HW#18.** Since HW#24 these order requests need `-H "Authorization: Bearer $TOKEN"` (log in as in [Verify](#verify)), and `POST /orders` takes no `user_id`: the order is the token user's. The WebSocket demo below already logs in.
 
 Run this after the [HW#15 setup](#hw15-and-earlier-database-pgbouncer-backup-historical): DB up, `.env` and `secrets/db_password` in place, migrations applied, `npm run seed` done. Start the app in a second terminal, after running the same `export` lines there: the app needs `RABBITMQ_URL`, and fails fast at startup without a valid one. The build is `tsc`, through `nest build`; `tsx` would not work, because it doesn't emit the decorator metadata Nest's dependency injection needs:
 
@@ -256,6 +297,74 @@ npm run demo:duplicate; echo "exit=$?"
 
 Exit codes: `0` every check held, `1` a check failed (the lines are still printed, and stderr names the failed check), `2` setup failed (broker or DB unreachable: a few seconds at most, no result lines). `npm run rabbitmq:smoke` checks the broker connection on its own (`RabbitMQ 4.3.7, confirm channel open`). Details in [Async events via RabbitMQ](#async-events-via-rabbitmq).
 
+## Auth
+
+HW#24. Login with email and password returns an **access token** (an ES256 JWT, 10 minutes) and a **refresh token** (opaque, 14 days from login). Every route needs the access token (`Authorization: Bearer …`) unless it's marked `@Public()`: login, refresh, the product reads, `/health`. Code: [src/auth/](src/auth/), keys and their checks in [src/config/jwt-keys.ts](src/config/jwt-keys.ts).
+
+| Variable | Source | Used for |
+|---|---|---|
+| `JWT_PRIVATE_KEY` | сховище (`.secrets/infisical.<env>.env`, HW#11) | signs access tokens: an EC P-256 private key, base64 of its PKCS#8 PEM |
+| `JWT_PUBLIC_KEY` | сховище (`.secrets/infisical.<env>.env`, HW#11) | verifies them: base64 of the SPKI PEM; at startup the app signs and verifies a test value, so a key that doesn't match the private one stops it |
+| `JWT_KID` | сховище (`.secrets/infisical.<env>.env`, HW#11) | the key id in every token's header, `<env>-<yyyy>-<mm>` (`dev-2026-11`, `prod-2026-11`) |
+| `REFRESH_TOKEN_PEPPER` | сховище (`.secrets/infisical.<env>.env`, HW#11) | the HMAC key for stored refresh tokens, at least 32 characters |
+| `DB_URL` | `.env` (password from `secrets/db_password`) | users and `refresh_tokens` |
+| `REDIS_QUEUE_URL` | the environment, through `with-secrets.sh` in dev | the access-token denylist (and sessions, rate limits, BullMQ) |
+| `REDIS_CACHE_URL` | the environment, through `with-secrets.sh` in dev | required at startup; not used by auth |
+| `RABBITMQ_URL` | the environment, through `with-secrets.sh` in dev | required at startup; not used by auth |
+
+Seeded login accounts (`npm run seed`, dev only): `customer1@example.com`, `customer2@example.com`, `seller@example.com`, `admin@example.com`, passwords in [src/seed-fixtures.ts](src/seed-fixtures.ts).
+
+A missing or malformed JWT variable stops the app at startup with the variable's name (`JWT_KID: expected <env>-<yyyy>-<mm>, e.g. dev-2026-11`, `JWT_PRIVATE_KEY: not an ES256 key (expected EC on P-256)`, `REFRESH_TOKEN_PEPPER: too short: at least 32 characters`); the values are never printed. A new set: `node scripts/generate-jwt-keys.mjs <env> >> .secrets/infisical.<env>.env`, redirected straight into the store.
+
+**Key fingerprints** (sha256 of the public key's DER; the app logs its own at startup as `JWT ES256 kid=… fingerprint=…`):
+- dev, `dev-2026-11`: `sha256:0b5af7f7c5a06996715cd7f7ff6e5b74f89ea87744fe88f97578824a0449db7f`
+- prod, `prod-2026-11`: `sha256:9532e19953cdef2d8a71d7c26461aff658e6ac0b336fc6cea079ca9e2566d034`
+
+### Why ES256
+
+An asymmetric algorithm, so only the API holds the signing key and anything else that verifies tokens (the WebSocket gateway today, other services later) gets only the public key, which can't forge one. HS256 would put the one shared secret in every verifier. Between the asymmetric ones, ES256 over RS256: a 64-byte signature instead of 256, a 32-byte key instead of 2048 bits, and faster signing, with the same support in jose and every JWT library. Verification pins it: `algorithms: ['ES256']`, plus `iss`, `aud`, `exp` (5 s clock tolerance) and the required claims, so `alg: none` and a token signed as HS256 with the public key are both refused.
+
+### `kid` and key rotation
+
+The token header carries `kid`, and the app verifies with a `kid → public key` map ([auth.module.ts](src/auth/auth.module.ts)), refusing an unknown kid. Rotation overlaps: generate a new set with a new kid, sign with it, and keep the old public key in the map until the last token signed with the old key has expired (10 minutes, plus the tolerance), then remove it. A **leaked** private key is removed from the map at once: every token it signed stops working, and its users log in again.
+
+### Refresh tokens
+
+Opaque (32 random bytes), stored only as `HMAC-SHA256(pepper, token)` in `refresh_tokens`, so a database leak doesn't give usable tokens. Each refresh **rotates**: the presented token is marked used and a new one issued in the same family (one family per login), all in one transaction with the row locked. Presenting a used token again is **reuse**: someone has a copy, so the whole family is revoked (committed before the 401), and the legitimate client is logged out too. The family keeps the login's 14-day deadline; rotation doesn't extend it. The refresh reads the role from `users` again.
+
+**Clients must serialize refreshes.** Two parallel refreshes with the same token are a reuse by definition: one gets 200, the other 401, and the family is revoked. There's no grace window that would accept the old token for a few seconds after a rotation, because a thief who replays within that window would get a valid pair too, and reuse detection would miss exactly the case it exists for. A client keeps one refresh in flight and lets other requests wait for it. The refresh token travels in the JSON body; a browser client would keep it in an `httpOnly`, `Secure`, `SameSite` cookie scoped to `/auth/refresh`, never in `localStorage` (#169).
+
+### Logout: two actions
+
+The two tokens die differently, so `POST /auth/logout` does two things:
+1. **The refresh family, in Postgres:** its rows get `revoked_at`. A row is enough to revoke.
+2. **The access token, in Redis:** it's self-contained, and nothing stored can stop it, so it goes on a **denylist**: its `jti` until its `exp`, and the login's `sid` (the family id, a claim in every access token) for the full access-token lifetime, which covers an older access token of the same login. Reuse detection adds the `sid` too.
+
+Two stores, so not atomic: **Postgres first, then Redis.** If Redis fails, logout answers **503** (never 204 for a half-done logout), and the client retries: both writes are idempotent, and the access token still authenticates the retry because its `jti` isn't denylisted yet. The other order would break the retry. Logout ends this login only; other logins of the user keep working.
+
+**The denylist:** on the queue Redis instance (`noeviction`: on the LRU cache, an evicted entry would make a revoked token valid again). Each entry's TTL is the token's remaining life **plus the 5 s clock tolerance**, since jose accepts a token until `exp + 5 s`; so the list never grows past the live tokens. The guard checks it after the signature on every protected request, and **fails closed**: if Redis doesn't answer within 200 ms, protected routes answer **503 with `Retry-After: 1`**, not 401 (a 401 would send every client to refresh and log in again during the outage) and not a pass (OWASP 2025 A10: failing open is the weakness). Public routes and login keep working.
+
+### Authorization
+
+- **Authentication:** `AccessTokenGuard`, global ([access-token.guard.ts](src/auth/access-token.guard.ts)): no token or a bad one → 401 with `WWW-Authenticate: Bearer`.
+- **The role:** `RolesGuard`, global, registered after it ([roles.guard.ts](src/auth/roles.guard.ts)), on routes marked `@Roles(...)`. It reads **the role in the token**, with no database query. `POST /products` is `@Roles('seller', 'admin')`: a customer gets 403.
+- **Ownership:** in the service, after loading the order ([orders.service.ts](src/orders/orders.service.ts) `findAccessible`), for every route that takes an order id (`GET /orders/{id}`, `PATCH …/status`, `GET …/events`). A missing order is **404**, someone else's **403**: one `WHERE id AND user_id` query couldn't tell the two apart. An admin may read and change any order (support).
+- **The order list** is filtered with `WHERE user_id = <the token's user>` ([orders.repository.ts](src/orders/orders.repository.ts)), admins included: it's "my orders".
+- **`POST /orders`** places the order for the token's user. `user_id` is no longer in the body; a body that has one gets 400.
+- The WebSocket handshake verifies the token and the denylist the same way, and `join` checks ownership.
+
+**The demotion window:** the role in the token is a cache. A demoted user keeps the old role **until the token they hold expires: up to 10 minutes plus the 5 s tolerance.** A refresh doesn't shorten it: the new token carries the new role, but the old one isn't revoked. To cut it short, revoke the user's logins (the `sid` denylist, as logout does).
+
+### Known gaps
+
+- **An open WebSocket survives logout:** the denylist is checked at the handshake only. The socket still closes at the token's `exp`.
+- **A full queue instance:** the denylist shares it with BullMQ, sessions and rate limits. With `noeviction`, a full instance refuses writes, so logouts answer 503 and jobs fail to enqueue. Its memory needs monitoring.
+- **Products have no owner:** any seller may add products, and if edit routes are added, any seller could edit any product (a role says what kind of user, not whose product, #170). It needs an owner column and a check like the orders one.
+- **An order's owner may change its status** (any legal transition): ownership is the only rule there today.
+- **The cap on concurrent password hashes** (2 at once, Argon2id takes 64 MiB each) answers **503 with `Retry-After`** to a login that finds it full, rather than queueing it. Login itself isn't rate-limited.
+
+OWASP Top 10 2025 (#171): A01 Broken Access Control → the role guard, ownership with 403, the filtered list, the user from the token; A04 Cryptographic Failures → ES256 pinned, Argon2id, peppered refresh hashes; A07 Authentication Failures → rotation, reuse detection, logout that ends both tokens; A10 Mishandling of Exceptional Conditions → the denylist fails closed.
+
 ## TypeORM data layer
 
 The HW#12 schema as entities in [src/entities/](src/entities/), created by the migration in [src/migrations/](src/migrations/). `synchronize: false` in [src/data-source.ts](src/data-source.ts): the schema changes only through reviewed migrations.
@@ -264,7 +373,7 @@ The HW#12 schema as entities in [src/entities/](src/entities/), created by the m
 |---|---|
 | `npm run migrate` / `migrate:show` / `migrate:revert` | apply, list, undo migrations |
 | `npm run migrate:generate -- src/migrations/Name` | diff entities against the live DB into a new migration |
-| `npm run seed` | deterministic, idempotent seed: 10 funded users + 1 underfunded, 10 products + the race product, 60 orders, 120 lines |
+| `npm run seed` | deterministic, idempotent seed: 10 funded users + 1 underfunded + 4 login accounts (15 users), 10 products + the race product, 60 orders, 120 lines |
 | `npm run demo:nplus1` | N+1 before/after, see [N+1](#n1) |
 | `npm run report` | revenue per product via the query builder, see [Report](#report) |
 | `npm run demo:race` | 50 concurrent checkouts for 10 units, see [Concurrency](#concurrency) |
@@ -332,22 +441,28 @@ grep -c 'next_cursor' openapi/openapi.yaml               # ≥ 1
 grep -c 'application/problem+json' openapi/openapi.yaml  # ≥ 2
 ```
 
-Validator at the boundary (server must be running — `npm start`):
+Validator at the boundary (server must be running — `npm start`). Since HW#24 the order routes need an access token; log in as a seeded account (`npm run seed`) first:
 
 ```bash
+TOKEN=$(curl -s -X POST http://localhost:3000/auth/login -H "Content-Type: application/json" \
+  -d '{"email":"customer1@example.com","password":"customer1-dev-password"}' | node -pe 'JSON.parse(require("fs").readFileSync(0)).accessToken')
+
 # no Idempotency-Key → 400, application/problem+json
 curl -i -X POST http://localhost:3000/orders \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"items":[{"product_id":1,"quantity":1}]}'
 
 # key present, but empty items → 400 with the validator's own detail
 curl -i -X POST http://localhost:3000/orders \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: 11111111-1111-4111-8111-111111111111" \
   -d '{"items":[]}'
 
 # valid request → 201
 curl -i -X POST http://localhost:3000/orders \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: 22222222-2222-4222-8222-222222222222" \
   -d '{"items":[{"product_id":1,"quantity":1}]}'
@@ -365,7 +480,7 @@ Every committed status change reaches clients live over two transports: an SSE s
 | Event history | `order_events` ([entity](src/entities/order-event.entity.ts); migrations `InitOrderEvent`, `BackfillOrderEvents`) | written with the status change in one transaction ([orders.service.ts](src/orders/orders.service.ts) `updateStatus`); checkout writes the creation event `null → paid` |
 | Status change | `PATCH /orders/{id}/status` ([openapi.yaml](openapi/openapi.yaml)) | guarded update + event insert, published only after commit; invalid or concurrent transition → `409` |
 | SSE | `GET /orders/{id}/events`: [orders.controller.ts](src/orders/orders.controller.ts) (`@Sse`) + `OrdersService.streamEvents` | history after `Last-Event-ID`, then live; `: ping` every 15 s |
-| WebSocket | [src/realtime/orders.gateway.ts](src/realtime/orders.gateway.ts), namespace `/orders`, same port | handshake `auth: { userId }`; `join { orderId }` checks ownership, joins `orders:<id>`, acks `{ ok, orderId, status, lastEventId }` or `{ ok: false, error }` |
+| WebSocket | [src/realtime/orders.gateway.ts](src/realtime/orders.gateway.ts), namespace `/orders`, same port | handshake `auth: { token }` (an access token, verified like on HTTP; the connection closes when it expires); `join { orderId }` checks ownership, joins `orders:<id>`, acks `{ ok, orderId, status, lastEventId }` or `{ ok: false, error }` |
 | Demo | [scripts/realtime-demo.mjs](scripts/realtime-demo.mjs) | see [Real-time demo](#real-time-demo) |
 
 ### Event ids
@@ -712,7 +827,7 @@ A client that gets no answer to `POST /orders` (a timeout, a dropped connection)
 **Concurrency comes for free.** A second request with the same key waits on the first one's index entry until it commits (then it's a replay), or until it rolls back (then it takes the key over). There's no "in progress" state, because it's all one transaction.
 
 - **The same key with a different body → `422`.** The fingerprint is a sha256 of the canonical body, with fixed field order and items sorted. It only detects misuse; it's never the key. Using the body's hash as the key would merge two identical orders placed on purpose (measured: two keys, one order).
-- **Keys are per user:** the same key from two users is two keys, two orders. User B can't receive user A's order. Here the user is the body's `user_id`, since the API has no auth, so the scoping is only as strong as that field; in a real app the user comes from the auth token, never from the body.
+- **Keys are per user:** the same key from two users is two keys, two orders. User B can't receive user A's order. Since HW#24 the user is the access token's, never the body's (see [Auth](#auth)); until then it was the body's `user_id`, so the scoping was only as strong as that field.
 - **Deleting an order deletes its key** (`ON DELETE CASCADE`), so a retry after that would create a new order. That's a deliberate choice: orders are never deleted in practice, and a key pointing at nothing would be useless.
 - **What a replay returns:** the same order, with `201`. Its `status` is the order's current one: the response is read again, not stored.
 - **A failed checkout** (out of stock, insufficient funds) rolls the key back with everything else. Only a created order is remembered, and a retry with the same key tries again.
@@ -810,7 +925,7 @@ The relay publishes, waits for the broker's confirm, and only then sets `publish
 
 - **`RABBITMQ_URL` is the brief's `BROKER_URL`:** one name for one secret, as stored since HW#19 (see Decisions, above).
 - **Debezium's column names:** the outbox uses snake_case (`aggregate_type`, `aggregate_id`); a move to CDC would set `route.by.field=aggregate_type` and `table.field.event.key=aggregate_id`.
-- **`user_id` comes from the request body,** since the API has no auth. In a real app it comes from the auth token, and so does the Idempotency-Key's scope.
+- **`user_id` came from the request body,** since the API had no auth. HW#24 takes it from the access token, and so does the Idempotency-Key's scope (see [Auth](#auth)).
 - **The `order.placed` v1 → v2 transition:** in dev the queue was purged; in production, deploy the reader that accepts both versions first, then switch the producer to v2.
 
 ## Redis: кеш, сесії, ліміти, черга (HW#23: cache, sessions, rate limit, queue)
@@ -859,7 +974,7 @@ When a card expires, many requests miss at the same moment. Now only one of them
 
 ### Rate limit
 
-`GET /products/{id}/card` and `POST /orders` allow **5 requests per 10 s per client** (the session's user, otherwise the IP), then answer `429` with `Retry-After`. The counter is a **sliding window** (a Redis sorted set updated by one Lua script on `redis-queue`), chosen because it's exact with no bursts at a window boundary, so every instance together lets through exactly the limit; the cost, one stored entry per allowed request, is tiny at 5 per 10 s.
+`GET /products/{id}/card` and `POST /orders` allow **5 requests per 10 s per client** (the access token's user, else the session's user, else the IP), then answer `429` with `Retry-After`. The counter is a **sliding window** (a Redis sorted set updated by one Lua script on `redis-queue`), chosen because it's exact with no bursts at a window boundary, so every instance together lets through exactly the limit; the cost, one stored entry per allowed request, is tiny at 5 per 10 s.
 
 - **One script, Redis's clock:** counting and adding happen atomically (a split script let 18 and 22 of 50 concurrent requests through), and the time comes from Redis's `TIME`, so instances with different clocks share one window.
 - **On the queue instance:** an evicted counter would hand its client a fresh allowance.
@@ -912,7 +1027,7 @@ Each demo builds first, applies pending migrations, creates its own data and del
 
 - **Access:** the dev instances have no password and listen on 127.0.0.1 only; production would put Redis on a private network with `AUTH` or ACLs (a user per service, limited to its commands and keys), the credentials only in the vault.
 - **Sizing:** 32 MB (cache) and 256 MB (queue) are dev settings a demo fills in seconds. Production sizes the cache from the hot set's real size, and the queue from the largest backlog it must hold (e.g. workers down for an hour) plus the sessions, with an alert well before the limit.
-- **`POST /sessions` is a stand-in:** it opens a session for any `user_id` with no credentials. Real login replaces it in HW#24; never ship it.
+- **`POST /sessions` is a stand-in:** it opens a session for any `user_id` with no credentials. HW#24's login (`POST /auth/login`, see [Auth](#auth)) is the real one; `POST /sessions` stays only for the HW#23 demos. Never ship it.
 - **Behind a proxy:** the rate limit's IP is the socket's (`trust proxy` off); behind a load balancer it must be set to the proxy's hop count, or every client shares the proxy's limit.
 
 ## Database: schema, seed, indexes
@@ -1118,7 +1233,7 @@ The spec and the contract are two separate nets. When the provider renamed `titl
 
 ### Contract gate (Pact broker)
 
-`docker compose up -d --wait` also starts a Pact broker on 21112, with its own Postgres. `verify:provider` switches on `PACT_BROKER_URL`: unset, it verifies the local `pacts/` file; set, it pulls the pact from the broker and publishes the result under `PROVIDER_VERSION`, or the short git SHA when that's unset. Through the vault, `bash scripts/with-secrets.sh dev npm run verify:provider` gets `PACT_BROKER_URL` from `.secrets/infisical.env`; without one, `SKIP_VAULT=1 PACT_BROKER_URL=http://127.0.0.1:21112 npm run verify:provider` takes it from the shell. The local broker has no authentication; `PACT_BROKER_TOKEN` is passed on only when set, and never lives in the repo.
+`docker compose up -d --wait` also starts a Pact broker on 21112, with its own Postgres. `verify:provider` switches on `PACT_BROKER_URL`: unset, it verifies the local `pacts/` file; set, it pulls the pact from the broker and publishes the result under `PROVIDER_VERSION`, or the short git SHA when that's unset. Through the vault, `bash scripts/with-secrets.sh dev npm run verify:provider` gets `PACT_BROKER_URL` from `.secrets/infisical.dev.env`; without one, `SKIP_VAULT=1 PACT_BROKER_URL=http://127.0.0.1:21112 npm run verify:provider` takes it from the shell. The local broker has no authentication; `PACT_BROKER_TOKEN` is passed on only when set, and never lives in the repo.
 
 The gate, as run (consumer and provider version both `0d3d994`, the commit under test):
 
@@ -1191,15 +1306,16 @@ Environment variables are validated on startup by [src/config/env.schema.ts](src
 | `PORT`                       | `.env`                   | — (default `3000`)                                 |
 | `DB_URL`                     | `.env`                   | the app, `demo:race`, `demo:workers`, `demo:retry` |
 | DB password (not an env var) | `secrets/db_password`    | the app and the same three demos                   |
-| `MIGRATIONS_DB_URL`          | `.secrets/infisical.env` | `migrate*`, `seed`, `demo:nplus1`, `report`        |
-| `REDIS_CACHE_URL`, `REDIS_QUEUE_URL` | `.secrets/infisical.env` | the app, the relay, the consumer      |
+| `MIGRATIONS_DB_URL`          | `.secrets/infisical.dev.env` | `migrate*`, `seed`, `demo:nplus1`, `report`        |
+| `REDIS_CACHE_URL`, `REDIS_QUEUE_URL` | `.secrets/infisical.dev.env` | the app, the relay, the consumer      |
 
 - **`PORT`:** the port the HTTP server listens on. Template for `.env`: `.env.example`.
 - **`DB_URL`:** Postgres connection string (`postgres://user@host:port/database`), pointing at PgBouncer (`localhost:21111`), not Postgres — see [PgBouncer](#pgbouncer). Any password segment is ignored — a password embedded in an env var can't be rotated without a restart, which defeats the point below, so the pool always gets its password from `secrets/db_password` instead.
 - **DB password:** a gitignored secret file (HW#11), rotated by `rotate.sh`. Read fresh on every new connection, so the password rotates without a restart. See [Database password](#database-password).
 - **`MIGRATIONS_DB_URL`:** connection string for the TypeORM CLI and DB scripts, as the schema owner (migrations run DDL, which `app_user` can't). Loaded by `scripts/with-secrets.sh` from the gitignored store. Not read by the app, so it isn't in `.env.example` — `check:env` would reject it. See [DB scripts and secrets](#db-scripts-and-secrets).
 - **`REDIS_CACHE_URL`, `REDIS_QUEUE_URL`:** the two Redis instances (HW#23), `redis-cache` on 127.0.0.1:21115 and `redis-queue` on 127.0.0.1:21116. The dev instances have no password and listen on 127.0.0.1 only; production would put Redis on a private network with `AUTH` or ACLs (a user per service, limited to its commands and keys), with the credentials only in the vault.
-- **Sessions and the rate limit (HW#23):** both on `redis-queue`; see [the Redis section](#redis-кеш-сесії-ліміти-черга-hw23-cache-sessions-rate-limit-queue). `POST /sessions` is a stand-in until real login in HW#24: **never ship it.**
+- **Sessions and the rate limit (HW#23):** both on `redis-queue`; see [the Redis section](#redis-кеш-сесії-ліміти-черга-hw23-cache-sessions-rate-limit-queue). `POST /sessions` is a stand-in that HW#24's login replaces (see [Auth](#auth)): **never ship it.**
+- **The JWT variables (HW#24):** `JWT_PRIVATE_KEY`, `JWT_PUBLIC_KEY`, `JWT_KID`, `REFRESH_TOKEN_PEPPER`, from the per-environment store; see [Auth](#auth).
 - **`CLEANUP_EVERY_MS`** (optional, `.env.example`): the BullMQ cleanup scheduler runs daily at 03:00; a number of ms (at least 1000) makes it run that often instead, for a demo only.
 
 Copy [.env.example](.env.example) to `.env` and adjust as needed:
@@ -1212,11 +1328,11 @@ cp .env.example .env
 
 ### DB scripts and secrets
 
-The DB scripts (`npm run migrate`, `migrate:show`, `migrate:revert`, `migrate:generate`, `seed`, `demo:nplus1`, `report`) run through [scripts/with-secrets.sh](scripts/with-secrets.sh), which loads `.secrets/infisical.env` into the environment and then `exec`s the command. Create the store once (the URL below is the dev-only bootstrap account already committed in [docker-compose.yml](docker-compose.yml), not a leaked credential — a real environment's store holds its own):
+The DB scripts (`npm run migrate`, `migrate:show`, `migrate:revert`, `migrate:generate`, `seed`, `demo:nplus1`, `report`) run through [scripts/with-secrets.sh](scripts/with-secrets.sh), which loads `.secrets/infisical.dev.env` into the environment and then `exec`s the command. Create the store once (the URL below is the dev-only bootstrap account already committed in [docker-compose.yml](docker-compose.yml), not a leaked credential — a real environment's store holds its own):
 
 ```bash
 mkdir -p .secrets
-echo 'MIGRATIONS_DB_URL=postgres://admin:admin-bootstrap-only@localhost:21110/shop' > .secrets/infisical.env
+echo 'MIGRATIONS_DB_URL=postgres://admin:admin-bootstrap-only@localhost:21110/shop' > .secrets/infisical.dev.env
 ```
 
 Without the store, export the variable yourself and skip it:
@@ -1311,7 +1427,7 @@ The multi-stage [Dockerfile](Dockerfile) only copies `dist/`, `package*.json`, `
 | `scripts/backup.sh` | `pg_dump -Fc` via `MIGRATIONS_DB_URL` into `backups/`, with per-table control values read from the dump, see [Backup](#backup) |
 | `scripts/restore-drill.sh`, `RESTORE-DRILL.md` | restores the newest dump into a throwaway container and checks it; the last run's record |
 | `backup.cron` | nightly 03:00 schedule for `scripts/backup.sh`, with install notes |
-| `scripts/with-secrets.sh` | loads `.secrets/infisical.env` and runs the command; `SKIP_VAULT=1` skips the store |
+| `scripts/with-secrets.sh` | `with-secrets.sh <env> <command>`: loads `.secrets/infisical.<env>.env` (dev, prod) and runs the command; `SKIP_VAULT=1` skips the store |
 | `.env.example` | env var contract, kept in sync with the schema via `npm run check:env` |
 | `scripts/realtime-demo.mjs` | room-isolation demo: `A_RECEIVED` / `B_RECEIVED`, `--same-room` control run, see [Real-time demo](#real-time-demo) |
 | `scripts/check-env-example.js` | diffs `.env.example` against the schema in both directions |

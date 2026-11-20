@@ -51,6 +51,11 @@ export class OrderEntity {
   })
   id: string;
 
+  // The owner's id as a plain column next to the relation (the same user_id column),
+  // so an ownership check reads it without a join.
+  @Column('bigint', { name: 'user_id' })
+  userId: string;
+
   @ManyToOne(() => UserEntity, { onDelete: 'RESTRICT', nullable: false })
   @JoinColumn({ name: 'user_id' })
   user: Relation<UserEntity>;

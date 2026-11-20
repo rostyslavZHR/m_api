@@ -6,6 +6,7 @@ import type { CookieOptions, Response } from 'express';
 import { SESSION_COOKIE, sessionOf } from './session.middleware.js';
 import type { SessionData } from './session.store.js';
 import { SessionsService } from './sessions.service.js';
+import { Public } from '../auth/public.decorator.js';
 
 // The Session schema in openapi/openapi.yaml.
 interface SessionView {
@@ -15,6 +16,9 @@ interface SessionView {
   expires_at: string;
 }
 
+// Public: HW#23's cookie-session stand-in has its own mechanism (the sid cookie), not
+// the bearer token. Replaced by real login (/auth/login) in HW#24; never ship it.
+@Public()
 @Controller()
 export class SessionsController {
   constructor(private readonly sessions: SessionsService) {}

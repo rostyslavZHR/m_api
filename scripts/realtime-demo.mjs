@@ -12,14 +12,20 @@
 // 2 = setup failed, so no verdict (app down, refused connect or join, no ack, a
 // failed checkout or PATCH, the deadline; no result lines).
 //
-// Config (env): DEMO_BASE_URL (default http://localhost:3000), DEMO_USER_ID (default 1,
-// a seeded user with a large balance).
+// Config (env): DEMO_BASE_URL (default http://localhost:3000), DEMO_EMAIL and
+// DEMO_PASSWORD (default the seeded customer1@example.com, who can log in and has a
+// large balance). The demo logs in first (HW#24): the order routes and the socket
+// handshake need an access token.
 
 import { randomUUID } from 'node:crypto';
 import { io } from 'socket.io-client';
 
 const BASE_URL = process.env.DEMO_BASE_URL ?? 'http://localhost:3000';
-const USER_ID = Number(process.env.DEMO_USER_ID ?? 1);
+const EMAIL = process.env.DEMO_EMAIL ?? 'customer1@example.com';
+const PASSWORD = process.env.DEMO_PASSWORD ?? 'customer1-dev-password';
+// Set by logIn(): the access token, and the user id it carries.
+let TOKEN;
+let USER_ID;
 const SAME_ROOM = process.argv.includes('--same-room');
 
 const REQUEST_TIMEOUT_MS = 3_000; // each HTTP request, connect and join ack
@@ -48,7 +54,11 @@ async function http(method, path, { body, headers } = {}) {
   try {
     response = await fetch(`${BASE_URL}${path}`, {
       method,
-      headers: { 'content-type': 'application/json', ...headers },
+      headers: {
+        'content-type': 'application/json',
+        ...(TOKEN && { authorization: `Bearer ${TOKEN}` }),
+        ...headers,
+      },
       ...(body !== undefined && { body: JSON.stringify(body) }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
@@ -67,7 +77,7 @@ async function http(method, path, { body, headers } = {}) {
 // The server refuses a bad handshake in middleware, so connect_error is final.
 function connect(label) {
   const socket = io(`${BASE_URL}/orders`, {
-    auth: { userId: USER_ID },
+    auth: { token: TOKEN },
     forceNew: true,
     reconnection: false,
     timeout: REQUEST_TIMEOUT_MS,
@@ -104,7 +114,7 @@ async function pickProduct() {
 async function createOrder(productId) {
   const { status, data } = await http('POST', '/orders', {
     headers: { 'idempotency-key': randomUUID() },
-    body: { user_id: USER_ID, items: [{ product_id: productId, quantity: 1 }] },
+    body: { items: [{ product_id: productId, quantity: 1 }] }, // for the token's user
   });
   if (status !== 201)
     throw new SetupError(
@@ -141,7 +151,19 @@ const receivedA = (socket, ack, orderA) =>
     ? 1
     : 0;
 
+// POST /auth/login, then GET /auth/me for the user id the token carries.
+async function logIn() {
+  const login = await http('POST', '/auth/login', { body: { email: EMAIL, password: PASSWORD } });
+  if (login.status !== 200)
+    throw new SetupError(`login as ${EMAIL} → ${login.status}: ${login.data?.detail ?? ''}`);
+  TOKEN = login.data.accessToken;
+  const me = await http('GET', '/auth/me');
+  if (me.status !== 200) throw new SetupError(`GET /auth/me → ${me.status}`);
+  USER_ID = Number(me.data.id);
+}
+
 async function run() {
+  await logIn();
   const [clientA, clientB] = await Promise.all([connect('A'), connect('B')]);
   log(`connected as user ${USER_ID}`);
 

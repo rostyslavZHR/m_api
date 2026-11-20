@@ -36,6 +36,12 @@ export interface FindOrderEvents {
   afterId: string;
 }
 
+export interface ListOrders {
+  userId: string;
+  limit: number;
+  afterId?: string;
+}
+
 export interface FindOwnedOrder {
   orderId: string;
   userId: string;
@@ -55,7 +61,7 @@ export class OrdersRepository {
   }: NewOrder): Promise<OrderEntity> {
     return this.manager.save(
       this.manager.create(OrderEntity, {
-        user: { id: userId },
+        userId,
         status,
         totalCents,
         items: items.map(({ productId, ...line }) =>
@@ -75,12 +81,14 @@ export class OrdersRepository {
     });
   }
 
-  // Keyset pagination by id: ids are unique and only grow. created_at can't be
-  // the key here, because a JS Date drops its microseconds, so a cursor built
-  // from one would sit just before the row it came from.
-  list(limit: number, afterId?: string): Promise<OrderEntity[]> {
+  // One user's orders only (WHERE user_id = $user): a list without the owner filter
+  // would show everyone's orders. Keyset pagination by id: ids are unique and only
+  // grow. created_at can't be the key here, because a JS Date drops its
+  // microseconds, so a cursor built from one would sit just before the row it came
+  // from.
+  list({ userId, limit, afterId }: ListOrders): Promise<OrderEntity[]> {
     return this.manager.find(OrderEntity, {
-      where: afterId ? { id: MoreThan(afterId) } : {},
+      where: afterId ? { userId, id: MoreThan(afterId) } : { userId },
       relations: { items: true },
       order: { id: 'ASC' },
       take: limit,

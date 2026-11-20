@@ -20,19 +20,28 @@ import {
   type UpdateOrderStatus,
 } from './orders.service.js';
 import { catchError, EMPTY, interval, map, merge, type Observable } from 'rxjs';
+import { CurrentUser } from '../auth/current-user.decorator.js';
+import type { AuthUser } from '../auth/tokens.js';
 
+// Every route acts as the caller (req.user, from the access token): the list holds
+// their orders, a new order is theirs, and a route with an order id checks that the
+// order is theirs (or that they're an admin) in OrdersService.
 @Controller('orders')
 export class OrdersController {
   constructor(private readonly ordersService: OrdersService) {}
 
   @Get()
-  list(@Query('limit') limit?: string, @Query('cursor') cursor?: string) {
-    return this.ordersService.list(limit, cursor);
+  list(
+    @CurrentUser() user: AuthUser,
+    @Query('limit') limit?: string,
+    @Query('cursor') cursor?: string,
+  ) {
+    return this.ordersService.list(user, limit, cursor);
   }
 
   @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.ordersService.getById(Number(id));
+  findOne(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.ordersService.getById(Number(id), user);
   }
 
   // 201 with the order, first time and on a replay alike; a replay also carries
@@ -42,11 +51,13 @@ export class OrdersController {
   @UseGuards(RateLimitGuard)
   async create(
     @Headers('idempotency-key') idempotencyKey: string,
+    @CurrentUser() user: AuthUser,
     @Body() body: CreateOrder,
     @Res({ passthrough: true }) res: Response,
   ) {
     const { order, replayed } = await this.ordersService.create(
       idempotencyKey,
+      user,
       body,
     );
     if (replayed) res.setHeader('Idempotent-Replayed', 'true');
@@ -54,8 +65,12 @@ export class OrdersController {
   }
 
   @Patch(':id/status')
-  updateStatus(@Param('id') id: string, @Body() { status }: UpdateOrderStatus) {
-    return this.ordersService.updateStatus({ id: Number(id), to: status });
+  updateStatus(
+    @Param('id') id: string,
+    @CurrentUser() user: AuthUser,
+    @Body() { status }: UpdateOrderStatus,
+  ) {
+    return this.ordersService.updateStatus({ id: Number(id), to: status, user });
   }
 
   // Nest subscribes to the returned Observable and writes each value to the response
@@ -64,11 +79,13 @@ export class OrdersController {
   @Sse(':id/events')
   async events(
     @Param('id') id: string,
+    @CurrentUser() user: AuthUser,
     @Headers('last-event-id') lastEventId?: string,
   ): Promise<Observable<MessageEvent>> {
     const events = await this.ordersService.streamEvents({
       orderId: Number(id),
       afterId: Number(lastEventId ?? 0),
+      user,
     });
 
     // merge: one stream with the order's events and a heartbeat interleaved as they

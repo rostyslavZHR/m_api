@@ -10,6 +10,7 @@ import { AddOutbox1794769025351 } from './1794769025351-AddOutbox.js';
 import { InvoicesPerOrder1794780921326 } from './1794780921326-InvoicesPerOrder.js';
 import { AddIdempotencyKeys1794781966337 } from './1794781966337-AddIdempotencyKeys.js';
 import { AddInvoiceEmails1795108320341 } from './1795108320341-AddInvoiceEmails.js';
+import { AuthUsersRefreshTokens1795181656185 } from './1795181656185-AuthUsersRefreshTokens.js';
 
 // A list, not a glob: TypeORM loads a glob through a dynamic import that Jest's
 // ESM mode can't follow. Add each new migration here; testkit.spec.ts fails if
@@ -27,4 +28,5 @@ export const migrations = [
   InvoicesPerOrder1794780921326,
   AddIdempotencyKeys1794781966337,
   AddInvoiceEmails1795108320341,
+  AuthUsersRefreshTokens1795181656185,
 ];

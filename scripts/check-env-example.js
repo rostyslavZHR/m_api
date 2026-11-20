@@ -1,8 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { parse } from 'dotenv';
-import { envSchema } from '../src/config/env.schema.ts';
+// The compiled schema (npm run check:env builds first): the source's relative
+// imports end in .js, which Node can't resolve to .ts files.
+import { apiEnvSchema } from '../dist/config/env.schema.js';
 
-const schemaKeys = Object.keys(envSchema.shape).sort();
+// The API's variables: the shared ones and the JWT keys.
+const schemaKeys = Object.keys(apiEnvSchema.shape).sort();
 const envExampleKeys = Object.keys(
   parse(readFileSync(new URL('../.env.example', import.meta.url))),
 ).sort();

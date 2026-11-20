@@ -24,6 +24,9 @@ export function configureApp(app: NestExpressApplication): NestExpressApplicatio
       apiSpec: OPENAPI_SPEC,
       validateRequests: true,
       validateResponses: true,
+      // Authentication is the global AccessTokenGuard's job (it sends
+      // WWW-Authenticate); the spec's bearerAuth documents it.
+      validateSecurity: false,
       ignorePaths: /^\/(health|db)(\/|$)/,
     }),
   );

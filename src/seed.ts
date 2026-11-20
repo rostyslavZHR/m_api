@@ -8,7 +8,8 @@ import {
   UserEntity,
   type OrderStatus,
 } from './entities/index.js';
-import { BROKE_USER_EMAIL, RACE_PRODUCT, USER_BALANCE_CENTS } from './seed-fixtures.js';
+import { hashPassword } from './auth/password.js';
+import { AUTH_USERS, BROKE_USER_EMAIL, RACE_PRODUCT, USER_BALANCE_CENTS } from './seed-fixtures.js';
 
 // Idempotent without explicit ids: ids are GENERATED ALWAYS, so every row is
 // found again by a natural key — email for users, name for products, and a
@@ -77,6 +78,22 @@ async function seedBrokeUser(manager: EntityManager): Promise<void> {
     { email: BROKE_USER_EMAIL, createdAt: USERS_CREATED_AT, balanceCents: toBigint(0) },
     ['email'],
   );
+}
+
+// The users that can log in, with their roles and hashed passwords. An upsert like
+// the others: each run sets the same role and balance, and a fresh hash of the same
+// password (a new salt each time; the password still verifies).
+async function seedAuthUsers(manager: EntityManager): Promise<void> {
+  const rows = await Promise.all(
+    AUTH_USERS.map(async ({ email, password, role }) => ({
+      email,
+      role,
+      passwordHash: await hashPassword(password),
+      createdAt: USERS_CREATED_AT,
+      balanceCents: toBigint(USER_BALANCE_CENTS),
+    })),
+  );
+  await manager.upsert(UserEntity, rows, ['email']);
 }
 
 // No unique key on name, so look up first. withDeleted, or a soft-deleted
@@ -167,6 +184,7 @@ try {
   await dataSource.transaction(async (manager) => {
     const users = await seedUsers(manager);
     await seedBrokeUser(manager);
+    await seedAuthUsers(manager);
     const products = await seedProducts(manager);
     await seedRaceProduct(manager);
     await seedOrders(manager, users, products);

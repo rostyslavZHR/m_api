@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -22,6 +23,7 @@ import {
   toStatusEvent,
 } from '../order-events/order-status-event.js';
 import { Observable } from 'rxjs';
+import type { AuthUser } from '../auth/tokens.js';
 
 // The OrderItem, Order and CreateOrder schemas in openapi/openapi.yaml.
 interface OrderItem {
@@ -37,8 +39,9 @@ export interface Order {
   created_at: string;
 }
 
+// No user_id: the order is placed for the caller (req.user), never for a user named in
+// the body. The spec's additionalProperties: false answers 400 to a body that has one.
 export interface CreateOrder {
-  user_id: number;
   items: OrderItem[];
 }
 
@@ -51,11 +54,13 @@ export interface UpdateOrderStatus {
 export interface UpdateStatus {
   id: number;
   to: OrderStatus;
+  user: AuthUser;
 }
 
 export interface StreamEvents {
   orderId: number;
   afterId: number;
+  user: AuthUser;
 }
 
 export interface FindOwnedOrder {
@@ -73,17 +78,25 @@ export interface OwnedOrder {
 // gives the same fingerprint. Only detects misuse of a key (same key, different
 // body); never used as the key, or two identical orders placed on purpose would
 // merge into one.
-const requestFingerprint = (body: CreateOrder): string =>
+const requestFingerprint = (userId: string, body: CreateOrder): string =>
   createHash('sha256')
     .update(
       JSON.stringify({
-        user_id: body.user_id,
+        user_id: userId,
         items: [...body.items]
           .sort((a, b) => a.product_id - b.product_id)
           .map(({ product_id, quantity }) => ({ product_id, quantity })),
       }),
     )
     .digest('hex');
+
+// The owner, or an admin. 403, not 404: the brief's criterion. It does tell a caller
+// that the id exists, which ids that only grow don't hide anyway.
+const assertCanAccess = (order: OrderEntity, user: AuthUser): void => {
+  if (order.userId !== user.id && user.role !== 'admin') {
+    throw new ForbiddenException(`Order ${order.id} is not yours.`);
+  }
+};
 
 // bigint columns arrive as strings; these values are far below 2^53.
 const toOrder = (entity: OrderEntity): Order => ({
@@ -107,21 +120,30 @@ export class OrdersService {
     private readonly ordersEventBus: OrderEventsBus,
   ) {}
 
-  async getById(id: number): Promise<Order> {
-    const order = await this.orders.findById(String(id));
-    if (!order) {
-      throw new NotFoundException(`Order ${id} not found.`);
-    }
-    return toOrder(order);
+  // The ownership level of authorization, for every route that takes an order id:
+  // load by id, then compare. An unknown id → 404, someone else's order → 403. (A
+  // WHERE id = $1 AND user_id = $2 can't tell the two apart: both find no row.)
+  // An admin may read and change any order (support).
+  async getById(id: number, user: AuthUser): Promise<Order> {
+    return toOrder(await this.findAccessible(id, user));
   }
 
-  async list(limitParam: string | undefined, cursorParam: string | undefined) {
+  // The caller's orders only, admins included: the list is "my orders".
+  async list(
+    user: AuthUser,
+    limitParam: string | undefined,
+    cursorParam: string | undefined,
+  ) {
     const limit = limitParam !== undefined ? Number(limitParam) : 20;
     const afterId =
       cursorParam !== undefined ? this.decodeCursor(cursorParam) : undefined;
 
     // One extra row tells whether another page exists.
-    const rows = await this.orders.list(limit + 1, afterId);
+    const rows = await this.orders.list({
+      userId: user.id,
+      limit: limit + 1,
+      afterId,
+    });
     const page = rows.slice(0, limit);
     const next_cursor =
       rows.length > limit ? this.encodeCursor(page[page.length - 1].id) : null;
@@ -134,6 +156,7 @@ export class OrdersService {
   // by every instance. `replayed` tells the controller to add Idempotent-Replayed.
   async create(
     idempotencyKey: string,
+    user: AuthUser,
     body: CreateOrder,
   ): Promise<{ order: Order; replayed: boolean }> {
     const productIds = body.items.map((item) => item.product_id);
@@ -143,13 +166,13 @@ export class OrdersService {
       );
     }
 
-    const fingerprint = requestFingerprint(body);
+    const fingerprint = requestFingerprint(user.id, body);
     let result: Awaited<ReturnType<typeof checkoutWithKey>>;
     try {
       result = await checkoutWithKey(
         this.dataSource,
         {
-          userId: String(body.user_id),
+          userId: user.id,
           items: body.items.map((item) => ({
             productId: String(item.product_id),
             quantity: item.quantity,
@@ -176,12 +199,12 @@ export class OrdersService {
     // same order as the first response; its status is the current one.
     const orderId = result.replayed ? result.orderId : result.order.id;
     return {
-      order: await this.getById(Number(orderId)),
+      order: toOrder(await this.findOrThrow(Number(orderId))),
       replayed: result.replayed,
     };
   }
 
-  async updateStatus({ id, to }: UpdateStatus): Promise<Order> {
+  async updateStatus({ id, to, user }: UpdateStatus): Promise<Order> {
     // No retry wrapper: one row lock at READ COMMITTED can't hit 40001/40P01,
     // and a lost race is a 409 for the client to re-read, not something to retry.
     const orderEvent = await this.dataSource.transaction(async (manager) => {
@@ -192,6 +215,7 @@ export class OrdersService {
       const order = await orders.findById(String(id));
 
       if (!order) throw new NotFoundException(`Order ${id} not found.`);
+      assertCanAccess(order, user);
       if (!ORDER_TRANSITIONS[order.status].includes(to)) {
         throw new ConflictException(
           `Order ${id} can't go from ${order.status} to ${to}.`,
@@ -213,18 +237,18 @@ export class OrdersService {
     });
 
     this.ordersEventBus.publish(toStatusEvent(orderEvent));
-    return this.getById(id);
+    return toOrder(await this.findOrThrow(id));
   }
 
   // One order's status events: history (rows already in order_events after afterId),
-  // then live events from the bus. The 404 check runs before the stream starts, so an
-  // unknown order still gets a proper problem+json response.
+  // then live events from the bus. The 404 and 403 checks run before the stream
+  // starts, so they still get a proper problem+json response.
   async streamEvents({
     orderId,
     afterId,
+    user,
   }: StreamEvents): Promise<Observable<OrderStatusEvent>> {
-    const order = await this.orders.findById(String(orderId));
-    if (!order) throw new NotFoundException(`Order ${orderId} not found.`);
+    await this.findAccessible(orderId, user);
 
     // Runs once per subscriber (per SSE connection), when Nest subscribes.
     return new Observable((subscriber) => {
@@ -282,6 +306,18 @@ export class OrdersService {
       status: row.status,
       lastEventId: row.lastEventId === null ? null : Number(row.lastEventId),
     };
+  }
+
+  private async findAccessible(id: number, user: AuthUser): Promise<OrderEntity> {
+    const order = await this.findOrThrow(id);
+    assertCanAccess(order, user);
+    return order;
+  }
+
+  private async findOrThrow(id: number): Promise<OrderEntity> {
+    const order = await this.orders.findById(String(id));
+    if (!order) throw new NotFoundException(`Order ${id} not found.`);
+    return order;
   }
 
   private encodeCursor(id: string): string {
