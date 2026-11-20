@@ -250,6 +250,8 @@ paths:
       responses:
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: The requested order
           content:
@@ -291,6 +293,8 @@ paths:
       responses:
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: A page of orders
           content:
@@ -329,6 +333,8 @@ paths:
       responses:
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '201':
           description: >
             The created order. A retry with the same Idempotency-Key and body (from
@@ -385,6 +391,8 @@ paths:
       responses:
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: The order with its new status
           content:
@@ -433,6 +441,8 @@ paths:
       responses:
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: >
             An event stream. Each status change is an `order.status` event
@@ -475,6 +485,14 @@ components:
           description: '`Bearer` when no token was sent; `Bearer error="invalid_token"` when one was rejected (RFC 6750).'
           schema:
             type: string
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Forbidden:
+      description: |
+        A valid access token, but this user may not do this (the role, or the order
+        isn't theirs). Unlike 401, logging in again or refreshing won't help.
       content:
         application/problem+json:
           schema:

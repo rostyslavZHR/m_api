@@ -365,7 +365,7 @@ Every committed status change reaches clients live over two transports: an SSE s
 | Event history | `order_events` ([entity](src/entities/order-event.entity.ts); migrations `InitOrderEvent`, `BackfillOrderEvents`) | written with the status change in one transaction ([orders.service.ts](src/orders/orders.service.ts) `updateStatus`); checkout writes the creation event `null → paid` |
 | Status change | `PATCH /orders/{id}/status` ([openapi.yaml](openapi/openapi.yaml)) | guarded update + event insert, published only after commit; invalid or concurrent transition → `409` |
 | SSE | `GET /orders/{id}/events`: [orders.controller.ts](src/orders/orders.controller.ts) (`@Sse`) + `OrdersService.streamEvents` | history after `Last-Event-ID`, then live; `: ping` every 15 s |
-| WebSocket | [src/realtime/orders.gateway.ts](src/realtime/orders.gateway.ts), namespace `/orders`, same port | handshake `auth: { userId }`; `join { orderId }` checks ownership, joins `orders:<id>`, acks `{ ok, orderId, status, lastEventId }` or `{ ok: false, error }` |
+| WebSocket | [src/realtime/orders.gateway.ts](src/realtime/orders.gateway.ts), namespace `/orders`, same port | handshake `auth: { token }` (an access token, verified like on HTTP; the connection closes when it expires); `join { orderId }` checks ownership, joins `orders:<id>`, acks `{ ok, orderId, status, lastEventId }` or `{ ok: false, error }` |
 | Demo | [scripts/realtime-demo.mjs](scripts/realtime-demo.mjs) | see [Real-time demo](#real-time-demo) |
 
 ### Event ids

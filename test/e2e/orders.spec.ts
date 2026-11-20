@@ -7,14 +7,18 @@ import { ProductsRepository } from '../../src/products/products.repository.js';
 import { createTestApp } from '../integration/testkit/app.js';
 import { aProduct, aUser } from '../integration/testkit/builders.js';
 import { startTestDatabase, type TestDatabase } from '../integration/testkit/postgres.js';
+import { accessTokenFor, bearer } from '../integration/testkit/tokens.js';
 
 describe('Orders API (e2e)', () => {
   let db: TestDatabase;
   let app: NestExpressApplication;
   let products: ProductsRepository;
   let users: Repository<UserEntity>;
+  let token: string;
 
-  const api = () => request(app.getHttpServer());
+  // Every request with an access token: the order routes require one (whose user
+  // doesn't matter yet; ownership comes with authorization).
+  const api = () => request.agent(app.getHttpServer()).set('Authorization', bearer(token));
   const orderBody = (user: UserEntity, product: ProductEntity, quantity: number) => ({
     user_id: Number(user.id),
     items: [{ product_id: Number(product.id), quantity }],
@@ -23,6 +27,7 @@ describe('Orders API (e2e)', () => {
   beforeAll(async () => {
     db = await startTestDatabase();
     app = await createTestApp(db);
+    token = await accessTokenFor({ id: '1' });
     products = new ProductsRepository(db.app.manager);
     users = db.app.getRepository(UserEntity);
   });

@@ -36,5 +36,7 @@ import { RefreshTokensRepository } from './refresh-tokens.repository.js';
     // Global: every route of the app requires a token unless marked @Public().
     { provide: APP_GUARD, useClass: AccessTokenGuard },
   ],
+  // The key map, for the WebSocket gateway's own handshake check.
+  exports: [VERIFICATION_KEYS],
 })
 export class AuthModule {}

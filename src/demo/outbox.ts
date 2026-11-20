@@ -25,7 +25,7 @@ await runDemo('demo:outbox', async (onCleanup) => {
   await prepare(onCleanup);
   const db = await openAppDb();
   onCleanup(() => db.destroy());
-  const { userId, productId } = await createFixture(db);
+  const { userId, productId, email, password } = await createFixture(db);
   log(`run user ${userId}, product ${productId}`);
 
   const consumer = startConsumer();
@@ -36,8 +36,15 @@ await runDemo('demo:outbox', async (onCleanup) => {
     throw new Error('the consumer did not start (see its log above)');
   }
 
-  // The API, in this process.
+  // The API, in this process; POST /orders needs an access token, so log in first.
   const { url } = await startApi(onCleanup);
+  const login = await fetch(`${url}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+  if (login.status !== 200) throw new Error(`POST /auth/login answered ${login.status}`);
+  const { accessToken } = (await login.json()) as { accessToken: string };
 
   // The same key twice, as a client retrying after a lost response would.
   const key = randomUUID();
@@ -45,7 +52,7 @@ await runDemo('demo:outbox', async (onCleanup) => {
   for (let i = 0; i < REQUESTS; i++) {
     const response = await fetch(`${url}/orders`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key },
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key, Authorization: `Bearer ${accessToken}` },
       body: JSON.stringify({
         user_id: Number(userId),
         items: [{ product_id: Number(productId), quantity: 1 }],

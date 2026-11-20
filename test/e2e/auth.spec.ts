@@ -173,6 +173,12 @@ describe('Auth API (e2e)', () => {
       await rejected(`${header}.${payload}.`);
     });
 
+    it('accepts the scheme name in any case (RFC 9110)', async () => {
+      const { accessToken } = (await login(user.email, PASSWORD).expect(200)).body as { accessToken: string };
+
+      await request(app.getHttpServer()).get('/auth/me').set('Authorization', `bearer ${accessToken}`).expect(200);
+    });
+
     it('the public routes answer without a token', async () => {
       await request(app.getHttpServer()).get('/products').expect(200);
       await request(app.getHttpServer()).get('/health').expect(200);

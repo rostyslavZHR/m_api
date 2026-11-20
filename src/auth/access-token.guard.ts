@@ -24,7 +24,8 @@ export class AccessTokenGuard implements CanActivate {
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    // HTTP only: the Socket.IO gateway (HW#18) isn't covered by this guard.
+    // HTTP only. The Socket.IO gateway (HW#18) authenticates its own handshake with
+    // the same verifyAccessToken (src/realtime/orders.gateway.ts).
     if (context.getType() !== 'http') return true;
     if (this.reflector.getAllAndOverride<boolean>(IS_PUBLIC, [context.getHandler(), context.getClass()])) return true;
 
@@ -33,8 +34,8 @@ export class AccessTokenGuard implements CanActivate {
     const response = http.getResponse<Response>();
 
     // RFC 6750: no token → just "Bearer", no error code; a token that was sent and
-    // rejected → error="invalid_token".
-    const token = /^Bearer ([A-Za-z0-9._~+/=-]+)$/.exec(request.headers.authorization ?? '')?.[1];
+    // rejected → error="invalid_token". The scheme name is case-insensitive (RFC 9110).
+    const token = /^Bearer +([A-Za-z0-9._~+/=-]+)$/i.exec(request.headers.authorization ?? '')?.[1];
     if (!token) {
       response.setHeader('WWW-Authenticate', 'Bearer');
       throw new UnauthorizedException('An access token is required.');
