@@ -286,8 +286,36 @@ describe('Auth API (e2e)', () => {
       const remaining = exp - Math.floor(Date.now() / 1000);
       const ttl = Number(await queue.cli('TTL', `deny:jti:${jti}`));
       expect(ttl).toBeGreaterThan(0);
-      expect(ttl).toBeLessThanOrEqual(remaining + 1);
-      expect(Number(await queue.cli('TTL', `deny:sid:${sid}`))).toBeLessThanOrEqual(600);
+      // + the 5 s clock tolerance: jose still accepts the token until exp + 5 s.
+      expect(ttl).toBeGreaterThan(remaining);
+      expect(ttl).toBeLessThanOrEqual(remaining + 5 + 1);
+      expect(Number(await queue.cli('TTL', `deny:sid:${sid}`))).toBeLessThanOrEqual(600 + 5);
+    });
+
+    it('a logged-out token stays rejected through the 5 s clock tolerance after its exp', async () => {
+      // jose accepts a token until exp + 5 s, so its denylist entries must outlive exp
+      // by as much, or the token works again in that window. The sid entry is removed
+      // to test the jti entry alone (it would cover this token: it lives 600 s from now).
+      const key = createPrivateKey(Buffer.from(process.env.JWT_PRIVATE_KEY!, 'base64').toString());
+      const now = Math.floor(Date.now() / 1000);
+      const sid = randomUUID();
+      const accessToken = await new SignJWT({ role: 'seller', sid })
+        .setProtectedHeader({ alg: 'ES256', kid: 'test-2026-11', typ: 'JWT' })
+        .setSubject(String(user.id))
+        .setJti(randomUUID())
+        .setIssuer('m_api')
+        .setAudience('m_api')
+        .setIssuedAt(now)
+        .setExpirationTime(now + 2)
+        .sign(key);
+      await logout(accessToken).expect(204);
+      // The sid entry outlives the longest access token of the login by the tolerance too.
+      expect(Number(await queue.cli('TTL', `deny:sid:${sid}`))).toBeGreaterThan(600);
+      await queue.cli('DEL', `deny:sid:${sid}`);
+
+      await new Promise((resolve) => setTimeout(resolve, 3_000));
+
+      await me(accessToken).expect(401);
     });
 
     it('ends one login only: another session of the same user keeps working', async () => {
