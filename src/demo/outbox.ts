@@ -53,10 +53,8 @@ await runDemo('demo:outbox', async (onCleanup) => {
     const response = await fetch(`${url}/orders`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key, Authorization: `Bearer ${accessToken}` },
-      body: JSON.stringify({
-        user_id: Number(userId),
-        items: [{ product_id: Number(productId), quantity: 1 }],
-      }),
+      // No user_id: the order is the token's user's (the fixture user logged in above).
+      body: JSON.stringify({ items: [{ product_id: Number(productId), quantity: 1 }] }),
     });
     const body = (await response.json()) as { id?: unknown };
     responses.push({

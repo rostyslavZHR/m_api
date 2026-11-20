@@ -12,6 +12,7 @@ import { TokenDenylist } from './denylist.js';
 import { AuthController } from './auth.controller.js';
 import { AuthService } from './auth.service.js';
 import { RefreshTokensRepository } from './refresh-tokens.repository.js';
+import { RolesGuard } from './roles.guard.js';
 
 @Module({
   imports: [DbModule],
@@ -44,6 +45,8 @@ import { RefreshTokensRepository } from './refresh-tokens.repository.js';
     },
     // Global: every route of the app requires a token unless marked @Public().
     { provide: APP_GUARD, useClass: AccessTokenGuard },
+    // Then @Roles(...): global guards run in this order, so the token is verified first.
+    { provide: APP_GUARD, useClass: RolesGuard },
   ],
   // The key map and the denylist, for the WebSocket gateway's own handshake check.
   exports: [VERIFICATION_KEYS, TokenDenylist],

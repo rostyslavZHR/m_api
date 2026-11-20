@@ -294,11 +294,45 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+    post:
+      operationId: createProduct
+      summary: Add a product (sellers and admins)
+      description: |
+        The role level of authorization: a customer's token gets 403. The role is read
+        from the access token, so a demoted seller can still add products until the
+        token's next refresh (at most 10 minutes).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProduct'
+      security:
+        - bearerAuth: []
+      responses:
+        '201':
+          description: The created product
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '400':
+          description: The request body is invalid
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/AuthUnavailable'
 
   /orders/{id}:
     get:
       operationId: getOrderById
-      summary: Get an order by ID
+      summary: Get an order by ID (the caller's own; an admin's any)
       parameters:
         - name: id
           in: path
@@ -331,7 +365,7 @@ paths:
   /orders:
     get:
       operationId: listOrders
-      summary: List orders
+      summary: List the caller's orders
       parameters:
         - name: limit
           in: query
@@ -374,7 +408,7 @@ paths:
                 $ref: '#/components/schemas/Problem'
     post:
       operationId: createOrder
-      summary: Create an order
+      summary: Create an order for the caller (the access token's user)
       parameters:
         - name: Idempotency-Key
           in: header
@@ -584,8 +618,9 @@ components:
             $ref: '#/components/schemas/Problem'
     TooManyRequests:
       description: >
-        Rate limited: at most 5 requests per 10 seconds per client (the session's
-        user, otherwise the IP address) on this route, over a sliding window.
+        Rate limited: at most 5 requests per 10 seconds per client (the access token's
+        user, else the session's user, else the IP address) on this route, over a
+        sliding window.
       headers:
         Retry-After:
           description: Whole seconds until a request would pass again; at least 1.
@@ -803,19 +838,39 @@ components:
 
     CreateOrder:
       type: object
+      description: |
+        The order is placed for, and charged to, the access token's user. There is no
+        user_id: a body that names one gets 400 (additionalProperties: false).
       additionalProperties: false
       properties:
-        user_id:
-          type: integer
-          description: The user who places the order and is charged for it.
         items:
           type: array
           items:
             $ref: '#/components/schemas/OrderItem'
           minItems: 1
       required:
-        - user_id
         - items
+
+    CreateProduct:
+      type: object
+      additionalProperties: false
+      properties:
+        title:
+          type: string
+          minLength: 1
+        description:
+          type: string
+          default: ''
+        price_cents:
+          type: integer
+          minimum: 0
+        stock:
+          type: integer
+          minimum: 0
+          default: 0
+      required:
+        - title
+        - price_cents
 
     OrderPage:
       type: object

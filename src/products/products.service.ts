@@ -18,6 +18,14 @@ export interface Product {
   in_stock: boolean;
 }
 
+// The CreateProduct schema in openapi/openapi.yaml: the body of POST /products.
+export interface CreateProduct {
+  title: string;
+  description?: string;
+  price_cents: number;
+  stock?: number;
+}
+
 // bigint columns arrive as strings; these values are far below 2^53.
 const toProduct = (entity: ProductEntity): Product => ({
   id: Number(entity.id),
@@ -48,6 +56,17 @@ export class ProductsService {
       throw new NotFoundException(`Product ${id} not found.`);
     }
     return product;
+  }
+
+  // A new id, so no cached card can be stale for it.
+  async create(body: CreateProduct): Promise<Product> {
+    const entity = await this.products.insert({
+      name: body.title,
+      description: body.description ?? '',
+      priceCents: String(body.price_cents),
+      stock: body.stock ?? 0,
+    });
+    return toProduct(entity);
   }
 
   // Cache-aside around the card's aggregate query. hit tells the controller

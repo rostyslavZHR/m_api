@@ -82,7 +82,7 @@ export const toOrderPlacedEvent = (
   occurredAt: order.createdAt.toISOString(),
   data: {
     orderId: Number(order.id),
-    userId: Number(order.user.id),
+    userId: Number(order.userId),
     totalCents: String(order.totalCents),
     items: order.items
       .map((item) => ({

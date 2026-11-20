@@ -117,7 +117,7 @@ describe('Rate limit (e2e)', () => {
         .set('Cookie', cookie)
         .set('Authorization', bearer(token))
         .set('Idempotency-Key', randomUUID())
-        .send({ user_id: Number(user.id), items: [{ product_id: Number(product.id), quantity: 1 }] });
+        .send({ items: [{ product_id: Number(product.id), quantity: 1 }] });
 
     for (let i = 0; i < limit; i++) await card(app, cookie).expect(200);
     for (let i = 0; i < limit; i++) await order().expect(201);

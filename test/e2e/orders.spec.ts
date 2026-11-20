@@ -16,13 +16,13 @@ describe('Orders API (e2e)', () => {
   let app: NestExpressApplication;
   let products: ProductsRepository;
   let users: Repository<UserEntity>;
-  let token: string;
+  let customer: UserEntity;
 
-  // Every request with an access token: the order routes require one (whose user
-  // doesn't matter yet; ownership comes with authorization).
-  const api = () => request.agent(app.getHttpServer()).set('Authorization', bearer(token));
-  const orderBody = (user: UserEntity, product: ProductEntity, quantity: number) => ({
-    user_id: Number(user.id),
+  // Every request as a user: the order routes require an access token, and act for
+  // its user (orders are placed for and read by their owner).
+  const api = async (user: UserEntity = customer) =>
+    request.agent(app.getHttpServer()).set('Authorization', bearer(await accessTokenFor({ id: user.id })));
+  const orderBody = (product: ProductEntity, quantity: number) => ({
     items: [{ product_id: Number(product.id), quantity }],
   });
 
@@ -31,7 +31,6 @@ describe('Orders API (e2e)', () => {
     // every protected route would answer 503.
     [db, queue] = await Promise.all([startTestDatabase(), startTestQueue()]);
     app = await createTestApp(db, { REDIS_QUEUE_URL: queue.url });
-    token = await accessTokenFor({ id: '1' });
     products = new ProductsRepository(db.app.manager);
     users = db.app.getRepository(UserEntity);
   });
@@ -41,6 +40,7 @@ describe('Orders API (e2e)', () => {
     // an empty denylist: the Redis is real now.
     await queue.cli('FLUSHALL');
     await db.reset();
+    customer = await aUser().insertVia(users);
   });
 
   afterAll(async () => {
@@ -51,20 +51,21 @@ describe('Orders API (e2e)', () => {
   it('runs on the test container: exactly the products arranged there, as app_user', async () => {
     const product = await aProduct().insertVia(products);
 
-    const { body } = await api().get('/products').expect(200);
+    const { body } = await (await api()).get('/products').expect(200);
     expect(body).toEqual([expect.objectContaining({ id: Number(product.id) })]);
-    expect((await api().get('/db').expect(200)).body.current_user).toBe('app_user');
+    expect((await (await api()).get('/db').expect(200)).body.current_user).toBe('app_user');
   });
 
   it('creates an order, then reads the same order back', async () => {
     const user = await aUser().withBalanceCents('10000').insertVia(users);
     const product = await aProduct().withStock(5).withPriceCents('1500').insertVia(products);
-    const body = orderBody(user, product, 2);
+    const body = orderBody(product, 2);
+    const as = await api(user);
 
-    const created = await api().post('/orders').set('Idempotency-Key', randomUUID()).send(body).expect(201);
+    const created = await as.post('/orders').set('Idempotency-Key', randomUUID()).send(body).expect(201);
     expect(created.body).toMatchObject({ items: body.items, total_cents: 3000, status: 'paid' });
 
-    const read = await api().get(`/orders/${created.body.id}`).expect(200);
+    const read = await as.get(`/orders/${created.body.id}`).expect(200);
     expect(read.body).toEqual(created.body);
 
     // Checked in the container itself, not through the API.
@@ -83,9 +84,10 @@ describe('Orders API (e2e)', () => {
     const user = await aUser().insertVia(users);
     const product = await aProduct().insertVia(products);
     const key = randomUUID();
+    const as = await api(user);
 
-    const first = await api().post('/orders').set('Idempotency-Key', key).send(orderBody(user, product, 1)).expect(201);
-    const second = await api().post('/orders').set('Idempotency-Key', key).send(orderBody(user, product, 1)).expect(201);
+    const first = await as.post('/orders').set('Idempotency-Key', key).send(orderBody(product, 1)).expect(201);
+    const second = await as.post('/orders').set('Idempotency-Key', key).send(orderBody(product, 1)).expect(201);
 
     expect(second.body).toEqual(first.body);
     expect(first.headers['idempotent-replayed']).toBeUndefined();
@@ -101,7 +103,8 @@ describe('Orders API (e2e)', () => {
     const user = await aUser().insertVia(users);
     const product = await aProduct().withStock(5).insertVia(products);
     const key = randomUUID();
-    const send = () => api().post('/orders').set('Idempotency-Key', key).send(orderBody(user, product, 1));
+    const as = await api(user);
+    const send = () => as.post('/orders').set('Idempotency-Key', key).send(orderBody(product, 1));
 
     // The second request's key insert waits on the first one's until it commits.
     const [a, b] = await Promise.all([send(), send()]);
@@ -117,9 +120,10 @@ describe('Orders API (e2e)', () => {
     const user = await aUser().insertVia(users);
     const product = await aProduct().withStock(5).insertVia(products);
     const key = randomUUID();
+    const as = await api(user);
 
-    await api().post('/orders').set('Idempotency-Key', key).send(orderBody(user, product, 1)).expect(201);
-    const misuse = await api().post('/orders').set('Idempotency-Key', key).send(orderBody(user, product, 2)).expect(422);
+    await as.post('/orders').set('Idempotency-Key', key).send(orderBody(product, 1)).expect(201);
+    const misuse = await as.post('/orders').set('Idempotency-Key', key).send(orderBody(product, 2)).expect(422);
 
     expect(misuse.headers['content-type']).toMatch(/application\/problem\+json/);
     expect(await counts()).toEqual({ orders: 1, outbox: 1 });
@@ -131,8 +135,8 @@ describe('Orders API (e2e)', () => {
     const product = await aProduct().withStock(5).insertVia(products);
     const key = randomUUID();
 
-    const a = await api().post('/orders').set('Idempotency-Key', key).send(orderBody(alice, product, 1)).expect(201);
-    const b = await api().post('/orders').set('Idempotency-Key', key).send(orderBody(bob, product, 1)).expect(201);
+    const a = await (await api(alice)).post('/orders').set('Idempotency-Key', key).send(orderBody(product, 1)).expect(201);
+    const b = await (await api(bob)).post('/orders').set('Idempotency-Key', key).send(orderBody(product, 1)).expect(201);
 
     expect(a.body.id).not.toBe(b.body.id);
     expect(b.headers['idempotent-replayed']).toBeUndefined();
@@ -140,26 +144,18 @@ describe('Orders API (e2e)', () => {
   });
 
   it('answers 404 with a problem body for an order that does not exist', async () => {
-    const { body } = await api().get('/orders/999').expect(404).expect('Content-Type', /application\/problem\+json/);
+    const { body } = await (await api()).get('/orders/999').expect(404).expect('Content-Type', /application\/problem\+json/);
     expect(body).toMatchObject({ status: 404 });
   });
 
-  it('answers 400 when the body breaks the spec (no user_id, quantity 0), and writes nothing', async () => {
+  it('answers 400 when the body breaks the spec (no items, quantity 0), and writes nothing', async () => {
     const product = await aProduct().insertVia(products);
+    const as = await api();
 
-    await api()
-      .post('/orders')
-      .set('Idempotency-Key', randomUUID())
-      .send({ items: [{ product_id: Number(product.id), quantity: 1 }] })
-      .expect(400);
+    await as.post('/orders').set('Idempotency-Key', randomUUID()).send({}).expect(400);
     // quantity: 0 would reach checkout() as a RangeError, a 500: the spec's
     // minimum: 1 has to stop it first.
-    const user = await aUser().insertVia(users);
-    await api()
-      .post('/orders')
-      .set('Idempotency-Key', randomUUID())
-      .send(orderBody(user, product, 0))
-      .expect(400);
+    await as.post('/orders').set('Idempotency-Key', randomUUID()).send(orderBody(product, 0)).expect(400);
     expect(await db.admin.manager.count(OrderEntity)).toBe(0);
   });
 
@@ -167,7 +163,7 @@ describe('Orders API (e2e)', () => {
     const user = await aUser().insertVia(users);
     const product = await aProduct().withStock(1).insertVia(products);
 
-    await api().post('/orders').set('Idempotency-Key', randomUUID()).send(orderBody(user, product, 2)).expect(409);
+    await (await api(user)).post('/orders').set('Idempotency-Key', randomUUID()).send(orderBody(product, 2)).expect(409);
     expect(await db.admin.manager.count(OrderEntity)).toBe(0);
     expect((await db.admin.manager.findOneByOrFail(ProductEntity, { id: product.id })).stock).toBe(1);
   });

@@ -114,7 +114,7 @@ async function pickProduct() {
 async function createOrder(productId) {
   const { status, data } = await http('POST', '/orders', {
     headers: { 'idempotency-key': randomUUID() },
-    body: { user_id: USER_ID, items: [{ product_id: productId, quantity: 1 }] },
+    body: { items: [{ product_id: productId, quantity: 1 }] }, // for the token's user
   });
   if (status !== 201)
     throw new SetupError(
