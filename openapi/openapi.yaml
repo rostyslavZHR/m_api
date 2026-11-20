@@ -76,6 +76,68 @@ paths:
         '429':
           $ref: '#/components/responses/TooManyRequests'
 
+  /auth/login:
+    post:
+      operationId: login
+      summary: Log in with email and password; returns an access token and a refresh token
+      description: |
+        The access token is an ES256 JWT (10 minutes; header alg + kid; claims sub, jti,
+        iat, exp, iss, aud, role). The refresh token is opaque (32 random bytes,
+        base64url), valid 14 days; only its HMAC is stored, so it is returned once,
+        here. An unknown email and a wrong password get the same 401.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Logged in
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          description: Invalid body
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          description: Wrong email or password (the same answer for both)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          description: Too many logins being checked at once (password hashing is capped); retry after the given seconds
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /auth/me:
+    get:
+      operationId: getMe
+      summary: Who the access token says you are (what the guard put on req.user)
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The authenticated user, from the token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthUser'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /sessions:
     post:
       operationId: createSession
@@ -183,7 +245,11 @@ paths:
           description: The ID of the order to retrieve.
           schema:
             type: integer
+      security:
+        - bearerAuth: []
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '200':
           description: The requested order
           content:
@@ -220,7 +286,11 @@ paths:
             never parse or construct this value yourself.
           schema:
             type: string
+      security:
+        - bearerAuth: []
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '200':
           description: A page of orders
           content:
@@ -254,7 +324,11 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/CreateOrder'
+      security:
+        - bearerAuth: []
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '201':
           description: >
             The created order. A retry with the same Idempotency-Key and body (from
@@ -306,7 +380,11 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/UpdateOrderStatus'
+      security:
+        - bearerAuth: []
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '200':
           description: The order with its new status
           content:
@@ -350,7 +428,11 @@ paths:
           schema: 
             type: integer
             minimum: 0
+      security:
+        - bearerAuth: []
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '200':
           description: >
             An event stream. Each status change is an `order.status` event
@@ -374,7 +456,29 @@ paths:
                 $ref: '#/components/schemas/Problem'
 
 components:
+  securitySchemes:
+    # Enforced by the app's global guard (AccessTokenGuard), not by the request
+    # validator (validateSecurity: false): one place decides, and it sends
+    # WWW-Authenticate. Every operation that lists it needs a valid access token.
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT (ES256)
+
   responses:
+    Unauthorized:
+      description: |
+        No access token, or one that was rejected (bad signature, expired, wrong
+        issuer or audience, unknown kid, an algorithm other than ES256).
+      headers:
+        WWW-Authenticate:
+          description: '`Bearer` when no token was sent; `Bearer error="invalid_token"` when one was rejected (RFC 6750).'
+          schema:
+            type: string
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
     TooManyRequests:
       description: >
         Rate limited: at most 5 requests per 10 seconds per client (the session's
@@ -480,6 +584,51 @@ components:
                 type: integer
             required: [product_id, title, orders]
       required: [id, title, description, price_cents, stock, in_stock, sales, bought_together]
+
+    AuthUser:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        role:
+          type: string
+          enum: [customer, seller, admin]
+        jti:
+          type: string
+        exp:
+          description: Seconds since the epoch.
+          type: integer
+      required: [id, role, jti, exp]
+
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+          minLength: 3
+          maxLength: 254
+        password:
+          type: string
+          minLength: 1
+          maxLength: 1024
+      required: [email, password]
+
+    TokenPair:
+      type: object
+      additionalProperties: false
+      properties:
+        accessToken:
+          description: 'ES256 JWT, sent as `Authorization: Bearer <token>`.'
+          type: string
+        refreshToken:
+          description: Opaque; exchanged for a new pair (it is not a JWT).
+          type: string
+        expiresIn:
+          description: The access token's lifetime, in seconds.
+          type: integer
+      required: [accessToken, refreshToken, expiresIn]
 
     Session:
       type: object

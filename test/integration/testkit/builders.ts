@@ -3,7 +3,7 @@ import type { ProductEntity, UserEntity } from '../../../src/entities/index.js';
 import type { NewOrder, OrdersRepository } from '../../../src/orders/orders.repository.js';
 import type { NewProduct, ProductsRepository } from '../../../src/products/products.repository.js';
 
-type NewUser = Pick<UserEntity, 'email' | 'balanceCents'>;
+type NewUser = Pick<UserEntity, 'email' | 'balanceCents'> & Partial<Pick<UserEntity, 'role' | 'passwordHash'>>;
 type UserRef = Pick<UserEntity, 'id'>;
 type ProductRef = Pick<ProductEntity, 'id' | 'name' | 'priceCents'>;
 
@@ -56,6 +56,18 @@ class UserBuilder {
 
   withBalanceCents(balanceCents: string) {
     this.user.balanceCents = balanceCents;
+    return this;
+  }
+
+  withRole(role: UserEntity['role']) {
+    this.user.role = role;
+    return this;
+  }
+
+  // A hash from src/auth/password.ts: hashPassword is slow on purpose (Argon2id), so
+  // a test hashes once and reuses it.
+  withPasswordHash(passwordHash: string) {
+    this.user.passwordHash = passwordHash;
     return this;
   }
 

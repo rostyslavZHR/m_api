@@ -23,3 +23,13 @@ export const RACE_PRODUCT = {
   priceCents: 1000, // 10.00
   stock: 10,
 };
+
+// The users that can log in (HW#24): two customers ("own" vs "foreign" orders), a
+// seller and an admin. Dev fixtures, not secrets: the passwords are known on purpose,
+// for the demos and the README, and stored hashed like any real password.
+export const AUTH_USERS = [
+  { email: 'customer1@example.com', password: 'customer1-dev-password', role: 'customer' },
+  { email: 'customer2@example.com', password: 'customer2-dev-password', role: 'customer' },
+  { email: 'seller@example.com', password: 'seller-dev-password', role: 'seller' },
+  { email: 'admin@example.com', password: 'admin-dev-password', role: 'admin' },
+] as const;
