@@ -185,4 +185,71 @@ describe('Auth API (e2e)', () => {
       await login(user.email, PASSWORD).expect(200);
     });
   });
+
+  describe('POST /auth/refresh: rotation and reuse detection', () => {
+    const refresh = (refreshToken: string) => request(app.getHttpServer()).post('/auth/refresh').send({ refreshToken });
+    const loginTokens = async () => (await login(user.email, PASSWORD).expect(200)).body as { refreshToken: string };
+    const hashOf = (token: string) => createHmac('sha256', process.env.REFRESH_TOKEN_PEPPER!).update(token).digest('hex');
+    const rowOf = (token: string) => db.app.getRepository(RefreshTokenEntity).findOneByOrFail({ tokenHash: hashOf(token) });
+    const family = (familyId: string) => db.app.getRepository(RefreshTokenEntity).findBy({ familyId });
+
+    it('rotates: a new pair, the old token marked used, the new one in the same family', async () => {
+      const { refreshToken: r1 } = await loginTokens();
+
+      const response = await refresh(r1).expect(200);
+      const r2 = (response.body as { refreshToken: string }).refreshToken;
+
+      expect(response.headers['cache-control']).toBe('no-store');
+      expect(r2).not.toBe(r1);
+      const [old, next] = [await rowOf(r1), await rowOf(r2)];
+      expect(old.usedAt).not.toBeNull();
+      expect(next.familyId).toBe(old.familyId);
+      expect(next.usedAt).toBeNull();
+      // A fixed maximum session: the successor keeps the login's deadline.
+      expect(next.expiresAt.getTime()).toBe(old.expiresAt.getTime());
+    });
+
+    it('a reused token revokes the whole family (committed), so the honest client is out too', async () => {
+      const { refreshToken: r1 } = await loginTokens();
+      const { refreshToken: other } = await loginTokens();
+      const r2 = ((await refresh(r1).expect(200)).body as { refreshToken: string }).refreshToken;
+
+      await refresh(r1).expect(401);
+
+      const rows = await family((await rowOf(r1)).familyId);
+      expect(rows).toHaveLength(2);
+      expect(rows.every((row) => row.revokedAt !== null)).toBe(true);
+      await refresh(r2).expect(401);
+      // Another login's family is untouched.
+      await refresh(other).expect(200);
+    });
+
+    it('an expired, unknown or empty token → 401', async () => {
+      const { refreshToken } = await loginTokens();
+      await db.app.getRepository(RefreshTokenEntity).update({ tokenHash: hashOf(refreshToken) }, { expiresAt: new Date(Date.now() - 1000) });
+
+      await refresh(refreshToken).expect(401);
+      await refresh('x'.repeat(43)).expect(401);
+      await refresh('').expect(400);
+    });
+
+    it('two parallel refreshes of one token: one 200, one 401, and the family is revoked', async () => {
+      const { refreshToken } = await loginTokens();
+
+      const statuses = (await Promise.all([refresh(refreshToken), refresh(refreshToken)])).map((r) => r.status);
+
+      expect(statuses.sort((a, b) => a - b)).toEqual([200, 401]);
+      const rows = await family((await rowOf(refreshToken)).familyId);
+      expect(rows.every((row) => row.revokedAt !== null)).toBe(true);
+    });
+
+    it('the new access token carries the role as it is now in users', async () => {
+      const { refreshToken } = await loginTokens();
+      await db.app.getRepository(UserEntity).update({ id: user.id }, { role: 'customer' });
+
+      const { accessToken } = (await refresh(refreshToken).expect(200)).body as { accessToken: string };
+
+      expect(decode(accessToken.split('.')[1]).role).toBe('customer');
+    });
+  });
 });

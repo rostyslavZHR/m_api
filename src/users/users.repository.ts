@@ -15,6 +15,13 @@ export class UsersRepository {
     return this.manager.existsBy(UserEntity, { id });
   }
 
+  // The role as it is now (the token's role claim is only a cache of it). null when
+  // the user is gone.
+  async findRole(id: string): Promise<UserRole | null> {
+    const user = await this.manager.findOne(UserEntity, { where: { id }, select: { id: true, role: true } });
+    return user?.role ?? null;
+  }
+
   // The one read that includes the password hash (not selected by default). By
   // the exact email: the unique index users_email_key serves it.
   findForLogin(email: string): Promise<LoginUser | null> {

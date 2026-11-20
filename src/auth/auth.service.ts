@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { Injectable, type OnModuleInit, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
+import { Injectable, Logger, type OnModuleInit, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { DataSource } from 'typeorm';
 import type { ApiEnv } from '../config/env.schema.js';
+import type { UserRole } from '../entities/index.js';
 import { UsersRepository } from '../users/users.repository.js';
 import { dummyPasswordHash, verifyPassword } from './password.js';
 import { RefreshTokensRepository } from './refresh-tokens.repository.js';
@@ -24,6 +26,15 @@ export interface TokenPair {
 // look the same, or the endpoint tells an attacker which emails are registered.
 const BAD_CREDENTIALS = 'Invalid email or password.';
 
+// One answer for every refresh failure (unknown, expired, revoked, reused): a client
+// SDK reacts to 401 by sending the user to log in.
+const BAD_REFRESH = 'The refresh token is invalid or expired.';
+
+type RefreshOutcome =
+  | { kind: 'rejected' }
+  | { kind: 'reused'; familyId: string; userId: string; revoked: number }
+  | { kind: 'rotated'; userId: string; role: UserRole; refreshToken: string };
+
 // At most this many password checks at once, in this process. Each Argon2id hash
 // takes 64 MiB and a libuv thread-pool thread (4 by default, shared with fs,
 // dns.lookup and crypto): without a cap, a burst of logins fills the pool and stalls
@@ -42,12 +53,14 @@ export class LoginBusyException extends ServiceUnavailableException {
 
 @Injectable()
 export class AuthService implements OnModuleInit {
+  private readonly logger = new Logger(AuthService.name);
   private passwordChecks = 0;
 
   constructor(
     private readonly users: UsersRepository,
     private readonly refreshTokens: RefreshTokensRepository,
     private readonly config: ConfigService<ApiEnv, true>,
+    private readonly dataSource: DataSource,
   ) {}
 
   // The dummy hash for unknown emails, computed before the first request: computed
@@ -94,5 +107,57 @@ export class AuthService implements OnModuleInit {
     });
 
     return { accessToken, refreshToken, expiresIn: ACCESS_TOKEN_TTL_SECONDS };
+  }
+
+  // Refresh-token rotation with reuse detection (#168), in one transaction:
+  //   the row, locked → unknown, revoked or expired: 401;
+  //   already used → someone replays an old token (a thief, or a client that
+  //     refreshed twice): revoke the WHOLE family, the honest client's newer token
+  //     too, and COMMIT that before answering 401: thrown inside the transaction, the
+  //     401 would roll the revocation back and leave the thief refreshing;
+  //   otherwise → mark it used, insert its successor in the same family, commit, and
+  //     sign a new access token with the role as it is NOW in users (the role claim is
+  //     a cache; this is where a demotion reaches the token).
+  // The successor keeps the family's original expiry: a fixed maximum session from
+  // the login, which refreshing can't extend.
+  async refresh(presented: string, now = new Date()): Promise<TokenPair> {
+    const pepper = this.config.get('REFRESH_TOKEN_PEPPER', { infer: true });
+    const outcome = await this.dataSource.transaction(async (manager): Promise<RefreshOutcome> => {
+      const tokens = new RefreshTokensRepository(manager);
+      const row = await tokens.findForUpdate(hashRefreshToken(pepper, presented));
+      if (!row || row.revokedAt || row.expiresAt <= now) return { kind: 'rejected' };
+      if (row.usedAt) {
+        const revoked = await tokens.revokeFamily(row.familyId, now);
+        return { kind: 'reused', familyId: row.familyId, userId: row.userId, revoked };
+      }
+
+      const role = await new UsersRepository(manager).findRole(row.userId);
+      if (!role) return { kind: 'rejected' };
+      await tokens.markUsed(row.id, now);
+      const refreshToken = newRefreshToken();
+      await tokens.insert({
+        userId: row.userId,
+        tokenHash: hashRefreshToken(pepper, refreshToken),
+        familyId: row.familyId,
+        expiresAt: row.expiresAt,
+      });
+      return { kind: 'rotated', userId: row.userId, role, refreshToken };
+    });
+
+    // Committed by now, whatever the outcome.
+    if (outcome.kind === 'reused') {
+      // The family and the user, never the token.
+      this.logger.warn(
+        `refresh token reuse: family ${outcome.familyId} of user ${outcome.userId} revoked (${outcome.revoked} tokens)`,
+      );
+    }
+    if (outcome.kind !== 'rotated') throw new UnauthorizedException(BAD_REFRESH);
+
+    const accessToken = await signAccessToken(
+      { privateKey: this.config.get('JWT_PRIVATE_KEY', { infer: true }), kid: this.config.get('JWT_KID', { infer: true }) },
+      { id: outcome.userId, role: outcome.role },
+      now,
+    );
+    return { accessToken, refreshToken: outcome.refreshToken, expiresIn: ACCESS_TOKEN_TTL_SECONDS };
   }
 }

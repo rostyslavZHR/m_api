@@ -122,6 +122,46 @@ paths:
               schema:
                 $ref: '#/components/schemas/Problem'
 
+  /auth/refresh:
+    post:
+      operationId: refresh
+      summary: Exchange a refresh token for a new pair (rotation)
+      description: |
+        The presented refresh token is used up and replaced by a new one in the same
+        family; the new access token carries the user's current role. Presenting a
+        token that was already used revokes its whole family (reuse detection), so
+        clients must never refresh the same token twice, nor in parallel.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: The new pair
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          description: Invalid body
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          description: Unknown, expired, revoked or already used refresh token (a reuse revokes the family)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
   /auth/me:
     get:
       operationId: getMe
@@ -618,6 +658,16 @@ components:
           description: Seconds since the epoch.
           type: integer
       required: [id, role, jti, exp]
+
+    RefreshRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        refreshToken:
+          type: string
+          minLength: 1
+          maxLength: 256
+      required: [refreshToken]
 
     LoginRequest:
       type: object
