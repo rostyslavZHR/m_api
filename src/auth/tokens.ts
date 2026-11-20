@@ -3,7 +3,9 @@
 // Access token: an ES256 JWT, short-lived, verified by signature alone (nothing is
 // stored server-side). Header: alg + kid (the verifier reads the kid from the
 // header to pick the key). Claims: sub, jti, iat, exp in SECONDS since the epoch
-// (Date.now() is milliseconds: a token that lives for millennia), and role.
+// (Date.now() is milliseconds: a token that lives for millennia), role, and sid:
+// the refresh family it was issued for (OIDC's session id), so logout and reuse
+// detection can cut off every access token of that login (the denylist).
 //
 // Refresh token: 32 random bytes, opaque (not a JWT), long-lived. Only its HMAC is
 // stored: HMAC-SHA256 with the pepper is deterministic, so a presented token is found
@@ -34,10 +36,11 @@ export interface SigningKey {
 export async function signAccessToken(
   { privateKey, kid }: SigningKey,
   user: { id: string; role: UserRole },
+  sid: string,
   now = new Date(),
 ): Promise<string> {
   const iat = Math.floor(now.getTime() / 1000);
-  return new SignJWT({ role: user.role })
+  return new SignJWT({ role: user.role, sid })
     .setProtectedHeader({ alg: JWT_ALG, kid, typ: 'JWT' })
     .setSubject(String(user.id))
     .setJti(randomUUID())
@@ -64,13 +67,15 @@ export type VerificationKeys = ReadonlyMap<string, KeyObject>;
 // exp (and nbf) may be off by this much: clocks on different machines drift.
 export const CLOCK_TOLERANCE_SECONDS = 5;
 
-// Who the request is from, as the guard puts it on req.user. jti and exp let a
-// denylist (Phase E) refuse one token until it would have expired anyway.
+// Who the request is from, as the guard puts it on req.user. jti and exp let the
+// denylist refuse one token until it would have expired anyway; sid (the refresh
+// family) lets it refuse every token of one login.
 export interface AuthUser {
   id: string;
   role: UserRole;
   jti: string;
   exp: number;
+  sid: string;
 }
 
 // A token whose kid isn't in the map: refused like a bad signature.
@@ -107,5 +112,6 @@ export async function verifyAccessToken(token: string, keys: VerificationKeys): 
   );
   const role = payload.role as UserRole;
   if (!USER_ROLES.includes(role)) throw new InvalidClaimsError('role');
-  return { id: payload.sub!, role, jti: payload.jti!, exp: payload.exp! };
+  if (typeof payload.sid !== 'string' || payload.sid === '') throw new InvalidClaimsError('sid');
+  return { id: payload.sub!, role, jti: payload.jti!, exp: payload.exp!, sid: payload.sid };
 }

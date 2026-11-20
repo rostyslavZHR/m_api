@@ -42,6 +42,14 @@ export class AuthController {
     return this.auth.refresh(body.refreshToken);
   }
 
+  // Protected: the guard has put jti, exp and sid on req.user. Ends this login only
+  // (other sessions of the user stay). 503 when it couldn't finish: retry it.
+  @Post('logout')
+  @HttpCode(204)
+  logout(@CurrentUser() user: AuthUser): Promise<void> {
+    return this.auth.logout(user);
+  }
+
   // Who the token says you are: what the guard put on req.user.
   @Get('me')
   me(@CurrentUser() user: AuthUser): AuthUser {

@@ -10,11 +10,13 @@ import { hashPassword } from '../../src/auth/password.js';
 import { createTestApp } from '../integration/testkit/app.js';
 import { aUser } from '../integration/testkit/builders.js';
 import { startTestDatabase, type TestDatabase } from '../integration/testkit/postgres.js';
+import { startTestQueue, type TestRedis } from '../integration/testkit/redis.js';
 
 const PASSWORD = 'correct horse battery staple';
 
 describe('Auth API (e2e)', () => {
   let db: TestDatabase;
+  let queue: TestRedis;
   let app: NestExpressApplication;
   let passwordHash: string;
   let user: UserEntity;
@@ -25,8 +27,10 @@ describe('Auth API (e2e)', () => {
   const decode = (part: string) => JSON.parse(Buffer.from(part, 'base64url').toString()) as Record<string, unknown>;
 
   beforeAll(async () => {
-    db = await startTestDatabase();
-    app = await createTestApp(db);
+    // A real Redis for the token denylist: the guard fails closed, so with none
+    // every protected route would answer 503.
+    [db, queue] = await Promise.all([startTestDatabase(), startTestQueue()]);
+    app = await createTestApp(db, { REDIS_QUEUE_URL: queue.url });
     passwordHash = await hashPassword(PASSWORD);
   });
 
@@ -37,7 +41,7 @@ describe('Auth API (e2e)', () => {
 
   afterAll(async () => {
     await app?.close();
-    await db?.stop();
+    await Promise.all([db?.stop(), queue?.stop()]);
   });
 
   it('returns an ES256 access token (alg + kid in the header) and an opaque refresh token', async () => {
@@ -144,7 +148,7 @@ describe('Auth API (e2e)', () => {
 
       const response = await me(accessToken).expect(200);
 
-      expect(response.body).toEqual({ id: String(user.id), role: 'seller', jti: claims.jti, exp: claims.exp });
+      expect(response.body).toEqual({ id: String(user.id), role: 'seller', jti: claims.jti, exp: claims.exp, sid: claims.sid });
     });
 
     it('a tampered token (role → admin, the old signature) → 401 invalid_token', async () => {
@@ -250,6 +254,75 @@ describe('Auth API (e2e)', () => {
       const { accessToken } = (await refresh(refreshToken).expect(200)).body as { accessToken: string };
 
       expect(decode(accessToken.split('.')[1]).role).toBe('customer');
+    });
+  });
+
+  describe('POST /auth/logout: the refresh family revoked, the access token denylisted', () => {
+    const tokens = async () => (await login(user.email, PASSWORD).expect(200)).body as { accessToken: string; refreshToken: string };
+    const me = (token: string) => request(app.getHttpServer()).get('/auth/me').set('Authorization', `Bearer ${token}`);
+    const logout = (token?: string) => {
+      const req = request(app.getHttpServer()).post('/auth/logout');
+      return token === undefined ? req : req.set('Authorization', `Bearer ${token}`);
+    };
+    const refresh = (refreshToken: string) => request(app.getHttpServer()).post('/auth/refresh').send({ refreshToken });
+
+    it('after logout, the access token and the refresh token both get 401', async () => {
+      const { accessToken, refreshToken } = await tokens();
+      await me(accessToken).expect(200);
+
+      await logout(accessToken).expect(204);
+
+      const after = await me(accessToken).expect(401);
+      expect(after.headers['www-authenticate']).toBe('Bearer error="invalid_token"');
+      await refresh(refreshToken).expect(401);
+    });
+
+    it('denylist entries live exactly as long as the token would have', async () => {
+      const { accessToken } = await tokens();
+      const { jti, exp, sid } = decode(accessToken.split('.')[1]) as { jti: string; exp: number; sid: string };
+
+      await logout(accessToken).expect(204);
+
+      const remaining = exp - Math.floor(Date.now() / 1000);
+      const ttl = Number(await queue.cli('TTL', `deny:jti:${jti}`));
+      expect(ttl).toBeGreaterThan(0);
+      expect(ttl).toBeLessThanOrEqual(remaining + 1);
+      expect(Number(await queue.cli('TTL', `deny:sid:${sid}`))).toBeLessThanOrEqual(600);
+    });
+
+    it('ends one login only: another session of the same user keeps working', async () => {
+      const first = await tokens();
+      const second = await tokens();
+
+      await logout(first.accessToken).expect(204);
+
+      await me(second.accessToken).expect(200);
+      await refresh(second.refreshToken).expect(200);
+    });
+
+    it('needs an access token', async () => {
+      await logout().expect(401);
+    });
+
+    it('a detected reuse also cuts off the access token the attacker got from refreshing', async () => {
+      const { refreshToken } = await tokens();
+      const attacker = (await refresh(refreshToken).expect(200)).body as { accessToken: string };
+      await me(attacker.accessToken).expect(200);
+
+      await refresh(refreshToken).expect(401);
+
+      await me(attacker.accessToken).expect(401);
+    });
+
+    it('fails closed: when the denylist cannot be checked, protected routes answer 503 with Retry-After', async () => {
+      const { accessToken } = await tokens();
+      await queue.cli('CLIENT', 'PAUSE', '1500', 'ALL');
+
+      const response = await me(accessToken).expect(503);
+
+      expect(response.headers['retry-after']).toBe('1');
+      await new Promise((resolve) => setTimeout(resolve, 1_600));
+      await me(accessToken).expect(200);
     });
   });
 });

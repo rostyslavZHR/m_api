@@ -6,9 +6,11 @@ import type { ApiEnv } from '../config/env.schema.js';
 import type { UserRole } from '../entities/index.js';
 import { UsersRepository } from '../users/users.repository.js';
 import { dummyPasswordHash, verifyPassword } from './password.js';
+import { TokenDenylist } from './denylist.js';
 import { RefreshTokensRepository } from './refresh-tokens.repository.js';
 import {
   ACCESS_TOKEN_TTL_SECONDS,
+  type AuthUser,
   hashRefreshToken,
   newRefreshToken,
   REFRESH_TOKEN_TTL_SECONDS,
@@ -33,7 +35,7 @@ const BAD_REFRESH = 'The refresh token is invalid or expired.';
 type RefreshOutcome =
   | { kind: 'rejected' }
   | { kind: 'reused'; familyId: string; userId: string; revoked: number }
-  | { kind: 'rotated'; userId: string; role: UserRole; refreshToken: string };
+  | { kind: 'rotated'; userId: string; role: UserRole; familyId: string; refreshToken: string };
 
 // At most this many password checks at once, in this process. Each Argon2id hash
 // takes 64 MiB and a libuv thread-pool thread (4 by default, shared with fs,
@@ -61,6 +63,7 @@ export class AuthService implements OnModuleInit {
     private readonly refreshTokens: RefreshTokensRepository,
     private readonly config: ConfigService<ApiEnv, true>,
     private readonly dataSource: DataSource,
+    private readonly denylist: TokenDenylist,
   ) {}
 
   // The dummy hash for unknown emails, computed before the first request: computed
@@ -90,19 +93,18 @@ export class AuthService implements OnModuleInit {
     }
     if (!user || !ok) throw new UnauthorizedException(BAD_CREDENTIALS);
 
-    const accessToken = await signAccessToken(
-      { privateKey: this.config.get('JWT_PRIVATE_KEY', { infer: true }), kid: this.config.get('JWT_KID', { infer: true }) },
-      user,
-      now,
-    );
+    // A new family per login. The access token carries it as sid, so a logout or a
+    // detected reuse can cut off its access tokens too.
+    const familyId = randomUUID();
+    const accessToken = await signAccessToken(this.signingKey(), user, familyId, now);
 
-    // A new family per login; the raw token goes back once, in this response, and is
-    // never stored or logged.
+    // The raw refresh token goes back once, in this response, and is never stored or
+    // logged.
     const refreshToken = newRefreshToken();
     await this.refreshTokens.insert({
       userId: user.id,
       tokenHash: hashRefreshToken(this.config.get('REFRESH_TOKEN_PEPPER', { infer: true }), refreshToken),
-      familyId: randomUUID(),
+      familyId,
       expiresAt: new Date(now.getTime() + REFRESH_TOKEN_TTL_SECONDS * 1000),
     });
 
@@ -141,7 +143,7 @@ export class AuthService implements OnModuleInit {
         familyId: row.familyId,
         expiresAt: row.expiresAt,
       });
-      return { kind: 'rotated', userId: row.userId, role, refreshToken };
+      return { kind: 'rotated', userId: row.userId, role, familyId: row.familyId, refreshToken };
     });
 
     // Committed by now, whatever the outcome.
@@ -150,14 +152,47 @@ export class AuthService implements OnModuleInit {
       this.logger.warn(
         `refresh token reuse: family ${outcome.familyId} of user ${outcome.userId} revoked (${outcome.revoked} tokens)`,
       );
+      // The family's access tokens too: one the attacker got from an earlier refresh
+      // would otherwise work until its exp. Best effort: the answer is a 401 either
+      // way, and the refresh tokens are already revoked.
+      await this.denylist.denySession(outcome.familyId).catch((error: Error) =>
+        this.logger.error(`family ${outcome.familyId}: access tokens not denylisted (${error.message}), they expire within ${ACCESS_TOKEN_TTL_SECONDS} s`),
+      );
     }
     if (outcome.kind !== 'rotated') throw new UnauthorizedException(BAD_REFRESH);
 
     const accessToken = await signAccessToken(
-      { privateKey: this.config.get('JWT_PRIVATE_KEY', { infer: true }), kid: this.config.get('JWT_KID', { infer: true }) },
+      this.signingKey(),
       { id: outcome.userId, role: outcome.role },
+      outcome.familyId,
       now,
     );
     return { accessToken, refreshToken: outcome.refreshToken, expiresIn: ACCESS_TOKEN_TTL_SECONDS };
+  }
+
+  // Logout, two actions, because the two tokens die differently:
+  //   1. the refresh family, in Postgres: revoked_at on its live rows (a row is enough);
+  //   2. the access token, in Redis: it's self-contained, so its jti goes on the
+  //      denylist until its exp, and the family's sid for the access-token lifetime
+  //      (any other access token of this login, e.g. one from before a refresh).
+  // Two stores, so not atomic (a dual write): Postgres first, then Redis. If Redis
+  // fails, the answer is 503, never a 204 for a half-done logout, and the client
+  // retries: both writes are idempotent, and the access token still passes the guard
+  // because its jti isn't denylisted yet. (The other order would break the retry: a
+  // denylisted jti can't authenticate the second attempt.)
+  async logout(user: AuthUser, now = new Date()): Promise<void> {
+    const revoked = await this.refreshTokens.revokeFamily(user.sid, now);
+    try {
+      await this.denylist.denyToken(user.jti, user.exp, now);
+      await this.denylist.denySession(user.sid);
+    } catch (error) {
+      this.logger.error(`logout of family ${user.sid}: refresh tokens revoked, denylist write failed (${(error as Error).message})`);
+      throw new ServiceUnavailableException('Logout could not be completed, try again.');
+    }
+    this.logger.log(`logout: family ${user.sid} of user ${user.id} (${revoked} refresh tokens revoked, jti ${user.jti} denylisted)`);
+  }
+
+  private signingKey() {
+    return { privateKey: this.config.get('JWT_PRIVATE_KEY', { infer: true }), kid: this.config.get('JWT_KID', { infer: true }) };
   }
 }

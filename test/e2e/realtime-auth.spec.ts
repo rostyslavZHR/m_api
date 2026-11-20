@@ -6,9 +6,11 @@ import { io } from 'socket.io-client';
 import { createTestApp } from '../integration/testkit/app.js';
 import { startTestDatabase, type TestDatabase } from '../integration/testkit/postgres.js';
 import { accessTokenFor } from '../integration/testkit/tokens.js';
+import { startTestQueue, type TestRedis } from '../integration/testkit/redis.js';
 
 describe('Realtime gateway handshake (e2e)', () => {
   let db: TestDatabase;
+  let queue: TestRedis;
   let app: NestExpressApplication;
   let url: string;
 
@@ -27,15 +29,17 @@ describe('Realtime gateway handshake (e2e)', () => {
     });
 
   beforeAll(async () => {
-    db = await startTestDatabase();
-    app = await createTestApp(db);
+    // A real Redis for the token denylist: the guard fails closed, so with none
+    // every protected route would answer 503.
+    [db, queue] = await Promise.all([startTestDatabase(), startTestQueue()]);
+    app = await createTestApp(db, { REDIS_QUEUE_URL: queue.url });
     await app.listen(0, '127.0.0.1');
     url = `http://127.0.0.1:${(app.getHttpServer().address() as AddressInfo).port}`;
   });
 
   afterAll(async () => {
     await app?.close();
-    await db?.stop();
+    await Promise.all([db?.stop(), queue?.stop()]);
   });
 
   it('refuses a handshake without a token, or with the old userId claim', async () => {

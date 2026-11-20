@@ -162,6 +162,25 @@ paths:
               schema:
                 $ref: '#/components/schemas/Problem'
 
+  /auth/logout:
+    post:
+      operationId: logout
+      summary: End this login (revoke its refresh tokens and its access tokens)
+      description: |
+        Revokes the refresh family the access token belongs to (its sid), denylists
+        this access token's jti until its exp, and the family's other access tokens
+        for the access-token lifetime. Other logins of the same user are untouched.
+        503 when only part of it could be done: retry it, it's idempotent.
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: Logged out
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/AuthUnavailable'
+
   /auth/me:
     get:
       operationId: getMe
@@ -177,6 +196,8 @@ paths:
                 $ref: '#/components/schemas/AuthUser'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/AuthUnavailable'
 
   /sessions:
     post:
@@ -290,6 +311,8 @@ paths:
       responses:
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/AuthUnavailable'
         '403':
           $ref: '#/components/responses/Forbidden'
         '200':
@@ -333,6 +356,8 @@ paths:
       responses:
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/AuthUnavailable'
         '403':
           $ref: '#/components/responses/Forbidden'
         '200':
@@ -373,6 +398,8 @@ paths:
       responses:
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/AuthUnavailable'
         '403':
           $ref: '#/components/responses/Forbidden'
         '201':
@@ -431,6 +458,8 @@ paths:
       responses:
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/AuthUnavailable'
         '403':
           $ref: '#/components/responses/Forbidden'
         '200':
@@ -481,6 +510,8 @@ paths:
       responses:
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/AuthUnavailable'
         '403':
           $ref: '#/components/responses/Forbidden'
         '200':
@@ -525,6 +556,20 @@ components:
           description: '`Bearer` when no token was sent; `Bearer error="invalid_token"` when one was rejected (RFC 6750).'
           schema:
             type: string
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    AuthUnavailable:
+      description: |
+        The token-revocation check (or, for logout, its second write) couldn't reach
+        its store: the request is refused (fail closed), not let through. Retry after
+        the given seconds.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            minimum: 1
       content:
         application/problem+json:
           schema:
@@ -657,7 +702,10 @@ components:
         exp:
           description: Seconds since the epoch.
           type: integer
-      required: [id, role, jti, exp]
+        sid:
+          description: The login (refresh family) the token belongs to.
+          type: string
+      required: [id, role, jti, exp, sid]
 
     RefreshRequest:
       type: object

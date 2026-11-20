@@ -11,7 +11,8 @@ import type { Subscription } from 'rxjs';
 import type { DefaultEventsMap, Namespace, Socket } from 'socket.io';
 import { z } from 'zod';
 import { VERIFICATION_KEYS } from '../auth/access-token.guard.js';
-import { verifyAccessToken, type VerificationKeys } from '../auth/tokens.js';
+import { TokenDenylist } from '../auth/denylist.js';
+import { type AuthUser, verifyAccessToken, type VerificationKeys } from '../auth/tokens.js';
 import type { OrderStatus } from '../entities/index.js';
 import { OrderEventsBus } from '../order-events/order-events.bus.js';
 import { OrdersService } from '../orders/orders.service.js';
@@ -66,6 +67,7 @@ export class OrdersGateway implements OnGatewayInit, OnModuleDestroy {
     private readonly bus: OrderEventsBus,
     private readonly ordersService: OrdersService,
     @Inject(VERIFICATION_KEYS) private readonly keys: VerificationKeys,
+    private readonly denylist: TokenDenylist,
   ) {}
 
   // Runs once, before any client connects.
@@ -78,7 +80,7 @@ export class OrdersGateway implements OnGatewayInit, OnModuleDestroy {
     server.use((socket, next) => {
       const parsed = Handshake.safeParse(socket.handshake.auth);
       if (!parsed.success) return next(new Error('unauthorized'));
-      verifyAccessToken(parsed.data.token, this.keys).then(
+      this.authenticate(parsed.data.token).then(
         (user) => {
           socket.data.userId = Number(user.id);
           // A socket outlives its handshake: close it when the token expires, so a
@@ -103,6 +105,14 @@ export class OrdersGateway implements OnGatewayInit, OnModuleDestroy {
       .subscribe((event) =>
         this.server.to(room(event.orderId)).emit('order.status', event),
       );
+  }
+
+  // The same two checks as the HTTP guard: the token verifies, and it isn't on the
+  // denylist (logout, reuse). Fail closed: a Redis error rejects the handshake too.
+  private async authenticate(token: string): Promise<AuthUser> {
+    const user = await verifyAccessToken(token, this.keys);
+    if (await this.denylist.isDenied(user)) throw Object.assign(new Error('denylisted'), { code: 'DENYLISTED' });
+    return user;
   }
 
   onModuleDestroy(): void {

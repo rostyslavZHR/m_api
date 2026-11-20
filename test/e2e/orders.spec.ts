@@ -8,9 +8,11 @@ import { createTestApp } from '../integration/testkit/app.js';
 import { aProduct, aUser } from '../integration/testkit/builders.js';
 import { startTestDatabase, type TestDatabase } from '../integration/testkit/postgres.js';
 import { accessTokenFor, bearer } from '../integration/testkit/tokens.js';
+import { startTestQueue, type TestRedis } from '../integration/testkit/redis.js';
 
 describe('Orders API (e2e)', () => {
   let db: TestDatabase;
+  let queue: TestRedis;
   let app: NestExpressApplication;
   let products: ProductsRepository;
   let users: Repository<UserEntity>;
@@ -25,20 +27,25 @@ describe('Orders API (e2e)', () => {
   });
 
   beforeAll(async () => {
-    db = await startTestDatabase();
-    app = await createTestApp(db);
+    // A real Redis for the token denylist: the guard fails closed, so with none
+    // every protected route would answer 503.
+    [db, queue] = await Promise.all([startTestDatabase(), startTestQueue()]);
+    app = await createTestApp(db, { REDIS_QUEUE_URL: queue.url });
     token = await accessTokenFor({ id: '1' });
     products = new ProductsRepository(db.app.manager);
     users = db.app.getRepository(UserEntity);
   });
 
   beforeEach(async () => {
+    // Each test starts with empty rate-limit counters (5 per 10 s on POST /orders) and
+    // an empty denylist: the Redis is real now.
+    await queue.cli('FLUSHALL');
     await db.reset();
   });
 
   afterAll(async () => {
     await app?.close();
-    await db?.stop();
+    await Promise.all([db?.stop(), queue?.stop()]);
   });
 
   it('runs on the test container: exactly the products arranged there, as app_user', async () => {
