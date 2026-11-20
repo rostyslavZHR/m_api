@@ -89,7 +89,7 @@ describe('Authorization (e2e)', () => {
       await anonymous().post('/products').set('Authorization', bearer(`${header}.${forged}.${signature}`)).send(newProduct).expect(401);
     });
 
-    it('the role comes from the token: a demoted seller still writes until the next refresh', async () => {
+    it('the role comes from the token: a demoted seller still writes until that token expires', async () => {
       const password = 'correct horse battery staple';
       const seller = await aUser().withRole('seller').withPasswordHash(await hashPassword(password)).insertVia(users);
       const { accessToken, refreshToken } = (await anonymous().post('/auth/login').send({ email: seller.email, password }).expect(200))
@@ -99,9 +99,11 @@ describe('Authorization (e2e)', () => {
       // The old token still says seller (up to 10 minutes).
       await anonymous().post('/products').set('Authorization', bearer(accessToken)).send(newProduct).expect(201);
 
-      // A refresh reads the role from users again.
+      // A refresh reads the role from users again for the new token, but doesn't revoke
+      // the old one: it still writes until its exp.
       const refreshed = (await anonymous().post('/auth/refresh').send({ refreshToken }).expect(200)).body as { accessToken: string };
       await anonymous().post('/products').set('Authorization', bearer(refreshed.accessToken)).send(newProduct).expect(403);
+      await anonymous().post('/products').set('Authorization', bearer(accessToken)).send(newProduct).expect(201);
     });
 
     it('an invalid body → 400 (spec), before any write', async () => {

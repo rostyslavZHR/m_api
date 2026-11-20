@@ -5,8 +5,9 @@
 //
 // The role comes from the access token, not from users: no query per request, but the
 // token is a copy, up to 10 minutes stale (its lifetime). A demoted seller keeps
-// writing products until their next refresh, which reads the role from users again,
-// or until the token expires. Logging out the user's sessions cuts it short.
+// writing products with the token they hold until it expires. A refresh doesn't cut
+// that short: it reads the role from users again for the new token, but the old one
+// isn't revoked. Logging out the user's sessions (the sid denylist) would.
 //
 // Throws ForbiddenException, never returns false: false is also a 403, but Nest's
 // default one, without the detail the problem+json body carries.
