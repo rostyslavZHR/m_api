@@ -1118,7 +1118,7 @@ The spec and the contract are two separate nets. When the provider renamed `titl
 
 ### Contract gate (Pact broker)
 
-`docker compose up -d --wait` also starts a Pact broker on 21112, with its own Postgres. `verify:provider` switches on `PACT_BROKER_URL`: unset, it verifies the local `pacts/` file; set, it pulls the pact from the broker and publishes the result under `PROVIDER_VERSION`, or the short git SHA when that's unset. Through the vault, `bash scripts/with-secrets.sh dev npm run verify:provider` gets `PACT_BROKER_URL` from `.secrets/infisical.env`; without one, `SKIP_VAULT=1 PACT_BROKER_URL=http://127.0.0.1:21112 npm run verify:provider` takes it from the shell. The local broker has no authentication; `PACT_BROKER_TOKEN` is passed on only when set, and never lives in the repo.
+`docker compose up -d --wait` also starts a Pact broker on 21112, with its own Postgres. `verify:provider` switches on `PACT_BROKER_URL`: unset, it verifies the local `pacts/` file; set, it pulls the pact from the broker and publishes the result under `PROVIDER_VERSION`, or the short git SHA when that's unset. Through the vault, `bash scripts/with-secrets.sh dev npm run verify:provider` gets `PACT_BROKER_URL` from `.secrets/infisical.dev.env`; without one, `SKIP_VAULT=1 PACT_BROKER_URL=http://127.0.0.1:21112 npm run verify:provider` takes it from the shell. The local broker has no authentication; `PACT_BROKER_TOKEN` is passed on only when set, and never lives in the repo.
 
 The gate, as run (consumer and provider version both `0d3d994`, the commit under test):
 
@@ -1191,8 +1191,8 @@ Environment variables are validated on startup by [src/config/env.schema.ts](src
 | `PORT`                       | `.env`                   | — (default `3000`)                                 |
 | `DB_URL`                     | `.env`                   | the app, `demo:race`, `demo:workers`, `demo:retry` |
 | DB password (not an env var) | `secrets/db_password`    | the app and the same three demos                   |
-| `MIGRATIONS_DB_URL`          | `.secrets/infisical.env` | `migrate*`, `seed`, `demo:nplus1`, `report`        |
-| `REDIS_CACHE_URL`, `REDIS_QUEUE_URL` | `.secrets/infisical.env` | the app, the relay, the consumer      |
+| `MIGRATIONS_DB_URL`          | `.secrets/infisical.dev.env` | `migrate*`, `seed`, `demo:nplus1`, `report`        |
+| `REDIS_CACHE_URL`, `REDIS_QUEUE_URL` | `.secrets/infisical.dev.env` | the app, the relay, the consumer      |
 
 - **`PORT`:** the port the HTTP server listens on. Template for `.env`: `.env.example`.
 - **`DB_URL`:** Postgres connection string (`postgres://user@host:port/database`), pointing at PgBouncer (`localhost:21111`), not Postgres — see [PgBouncer](#pgbouncer). Any password segment is ignored — a password embedded in an env var can't be rotated without a restart, which defeats the point below, so the pool always gets its password from `secrets/db_password` instead.
@@ -1212,11 +1212,11 @@ cp .env.example .env
 
 ### DB scripts and secrets
 
-The DB scripts (`npm run migrate`, `migrate:show`, `migrate:revert`, `migrate:generate`, `seed`, `demo:nplus1`, `report`) run through [scripts/with-secrets.sh](scripts/with-secrets.sh), which loads `.secrets/infisical.env` into the environment and then `exec`s the command. Create the store once (the URL below is the dev-only bootstrap account already committed in [docker-compose.yml](docker-compose.yml), not a leaked credential — a real environment's store holds its own):
+The DB scripts (`npm run migrate`, `migrate:show`, `migrate:revert`, `migrate:generate`, `seed`, `demo:nplus1`, `report`) run through [scripts/with-secrets.sh](scripts/with-secrets.sh), which loads `.secrets/infisical.dev.env` into the environment and then `exec`s the command. Create the store once (the URL below is the dev-only bootstrap account already committed in [docker-compose.yml](docker-compose.yml), not a leaked credential — a real environment's store holds its own):
 
 ```bash
 mkdir -p .secrets
-echo 'MIGRATIONS_DB_URL=postgres://admin:admin-bootstrap-only@localhost:21110/shop' > .secrets/infisical.env
+echo 'MIGRATIONS_DB_URL=postgres://admin:admin-bootstrap-only@localhost:21110/shop' > .secrets/infisical.dev.env
 ```
 
 Without the store, export the variable yourself and skip it:
@@ -1311,7 +1311,7 @@ The multi-stage [Dockerfile](Dockerfile) only copies `dist/`, `package*.json`, `
 | `scripts/backup.sh` | `pg_dump -Fc` via `MIGRATIONS_DB_URL` into `backups/`, with per-table control values read from the dump, see [Backup](#backup) |
 | `scripts/restore-drill.sh`, `RESTORE-DRILL.md` | restores the newest dump into a throwaway container and checks it; the last run's record |
 | `backup.cron` | nightly 03:00 schedule for `scripts/backup.sh`, with install notes |
-| `scripts/with-secrets.sh` | loads `.secrets/infisical.env` and runs the command; `SKIP_VAULT=1` skips the store |
+| `scripts/with-secrets.sh` | `with-secrets.sh <env> <command>`: loads `.secrets/infisical.<env>.env` (dev, prod) and runs the command; `SKIP_VAULT=1` skips the store |
 | `.env.example` | env var contract, kept in sync with the schema via `npm run check:env` |
 | `scripts/realtime-demo.mjs` | room-isolation demo: `A_RECEIVED` / `B_RECEIVED`, `--same-room` control run, see [Real-time demo](#real-time-demo) |
 | `scripts/check-env-example.js` | diffs `.env.example` against the schema in both directions |

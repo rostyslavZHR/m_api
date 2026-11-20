@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { OrdersModule } from './orders/orders.module.js';
 import { ProductsModule } from './products/products.module.js';
-import { validate } from './config/index.js';
+import { validateApiEnv } from './config/index.js';
 import { ConfigModule } from '@nestjs/config';
 import { HealthCheckModule } from './health-check/health-check.module.js';
 import { DbModule } from './db/db.module.js';
@@ -14,7 +14,8 @@ import { JobsModule } from './jobs/jobs.module.js';
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      validate,
+      // The same check main.ts ran first; ConfigService then holds the decoded keys.
+      validate: validateApiEnv,
     }),
     ProductsModule,
     OrdersModule,

@@ -1,3 +1,4 @@
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -29,6 +30,14 @@ export async function createTestApp(db: TestDatabase, env: Record<string, string
   // The same for Redis, until a suite needs it.
   process.env.REDIS_CACHE_URL = 'redis://127.0.0.1:1';
   process.env.REDIS_QUEUE_URL = 'redis://127.0.0.1:1';
+  // The JWT keys the API requires: a throwaway ES256 pair per test file, never the
+  // vault's.
+  const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const base64 = (pem: string) => Buffer.from(pem).toString('base64');
+  process.env.JWT_PRIVATE_KEY = base64(privateKey.export({ type: 'pkcs8', format: 'pem' }) as string);
+  process.env.JWT_PUBLIC_KEY = base64(publicKey.export({ type: 'spki', format: 'pem' }) as string);
+  process.env.JWT_KID = 'test-2026-11';
+  process.env.REFRESH_TOKEN_PEPPER = randomBytes(32).toString('base64url');
   Object.assign(process.env, env);
   const { AppModule } = await import('../../../src/app.module.js');
 
