@@ -200,8 +200,8 @@ export class UploadsService {
 
   // An object that failed a check is deleted, so it can't be served or counted, and the
   // client can PUT the right file again while its URL is still valid. The row stays
-  // PENDING. Best effort: a failed delete is logged; a lifecycle rule (Phase D) expires
-  // what's left under uploads/.
+  // PENDING. Best effort: a failed delete is logged, and the object stays until a cleanup
+  // removes it.
   private async discard(file: FileEntity, reason: string): Promise<void> {
     this.logger.warn(`commit: file ${file.id} key ${file.key} rejected (${reason}), object removed`);
     await this.s3
