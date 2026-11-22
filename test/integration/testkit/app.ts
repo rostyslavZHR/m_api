@@ -45,6 +45,13 @@ export async function createTestApp(db: TestDatabase, env: Record<string, string
   // The same for Redis, until a suite needs it.
   process.env.REDIS_CACHE_URL = 'redis://127.0.0.1:1';
   process.env.REDIS_QUEUE_URL = 'redis://127.0.0.1:1';
+  // The object store (HW#26): the same, until a suite needs it. The client connects
+  // only when a request is sent.
+  process.env.S3_ENDPOINT = 'http://127.0.0.1:1';
+  process.env.S3_REGION = 'garage';
+  process.env.S3_ACCESS_KEY_ID = 'test-access-key';
+  process.env.S3_SECRET_ACCESS_KEY = 'test-secret-key';
+  process.env.S3_BUCKET = 'test-files';
   // The JWT keys the API requires: a throwaway ES256 set per test file, never the
   // vault's, and the same for every app the file starts (AppModule reads the
   // environment once, and tokens minted by the test must verify on all of them).

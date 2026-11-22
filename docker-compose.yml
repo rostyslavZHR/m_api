@@ -148,6 +148,42 @@ services:
       timeout: 2s
       retries: 15
 
+  # Object storage (HW#26): Garage, an S3-compatible store (MinIO's free edition has
+  # been unmaintained since December 2025). One node, S3 API on 127.0.0.1:21117.
+  #
+  # The bootstrap is Garage's own (v2.3+): --single-node assigns the node a layout role,
+  # and --default-bucket creates the access key and the bucket below and grants the key
+  # read/write/owner on it. The data is on a tmpfs, so each start begins empty and
+  # bootstraps again: a second `up` or a `down`/`up` can't trip over leftovers.
+  # The bucket is private: no website mode, no anonymous access (an unsigned GET → 403).
+  #
+  # The credentials are dev-only bootstrap values, like the DB passwords above: the
+  # app gets its copy from the secrets store (S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY in
+  # .secrets/infisical.dev.env), never from this file.
+  garage:
+    image: dxflrs/garage:v2.5.0
+    command: ["/garage", "server", "--single-node", "--default-bucket"]
+    environment:
+      GARAGE_RPC_SECRET: 2a4be25db6a986d7d68be58efcc35f2cb584c89acabe56d32555ed3005a511f9
+      GARAGE_DEFAULT_ACCESS_KEY: GK11af531b79412bf2c74a8cba
+      GARAGE_DEFAULT_SECRET_KEY: 0689921fc5c9befe010e47aa684a1b369453a110be5401c9bb8a40ce44fc62b9
+      GARAGE_DEFAULT_BUCKET: hw26-files
+    volumes:
+      - ./garage/garage.toml:/etc/garage.toml:ro
+    # At least 1g: a full tmpfs kills the store mid-run.
+    tmpfs:
+      - /var/lib/garage:size=1g
+    ports:
+      - "127.0.0.1:21117:3900"
+    # Healthy only once the bucket exists: the image has no shell or curl, so the probe
+    # is Garage's own CLI, which fails until the bootstrap has created the bucket.
+    # `up --wait` returns only then.
+    healthcheck:
+      test: ["CMD", "/garage", "bucket", "info", "hw26-files"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
 volumes:
   pgdata:
   pact-broker-data:
