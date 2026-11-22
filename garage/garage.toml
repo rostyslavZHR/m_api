@@ -1,0 +1,31 @@
+# Garage (HW#26): the dev object store, one node. Mounted at /etc/garage.toml, where the
+# server and the CLI (the healthcheck) both read it. The rpc_secret comes from the
+# environment (GARAGE_RPC_SECRET in docker-compose.yml).
+#
+# Both directories are on a tmpfs (docker-compose.yml): every `down` / `up` starts from an
+# empty store, and `--single-node --default-bucket` recreates the layout, the key and
+# the bucket at each start.
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "sqlite"
+
+# One node holds every copy. Dev only: Garage's docs say 1 is for tests.
+replication_factor = 1
+
+rpc_bind_addr = "[::]:3901"
+rpc_public_addr = "127.0.0.1:3901"
+
+[s3_api]
+# The region the S3 API accepts, and so the one every client must sign for (S3_REGION):
+# any other region fails every request's signature.
+s3_region = "garage"
+api_bind_addr = "[::]:3900"
+root_domain = ".s3.garage.localhost"
+
+# No [s3_web] section: no website endpoint, so no bucket can be served anonymously.
+
+# The admin API, for the garage-edge-key one-shot only (the edge's read-only key). Not
+# published to the host; the token comes from GARAGE_ADMIN_TOKEN in docker-compose.yml.
+[admin]
+api_bind_addr = "[::]:3903"
+

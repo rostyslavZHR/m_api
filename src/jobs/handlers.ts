@@ -4,6 +4,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { DataSource } from 'typeorm';
 import { runAllCleanups } from '../maintenance/cleanup.js';
+import { type CleanupDeps, cleanupAbandonedUploads } from '../uploads/abandoned-uploads.js';
 
 // The fake email provider's latency: long enough that a worker can be killed in
 // the middle of a send.
@@ -24,5 +25,10 @@ export async function sendInvoiceEmail(dataSource: DataSource, orderId: number):
   return inserted.length === 1 ? 'sent' : 'already sent';
 }
 
-// Deletes by age only, so running it twice deletes nothing the second time.
-export const cleanup = (dataSource: DataSource) => runAllCleanups(dataSource);
+// Deletes by age only, so running it twice deletes nothing the second time. The abandoned
+// uploads (HW#26) too: a second run finds nothing older than the threshold left.
+export async function cleanup(dataSource: DataSource, uploads: CleanupDeps): Promise<Record<string, number>> {
+  const deleted = await runAllCleanups(dataSource);
+  const { removed } = await cleanupAbandonedUploads(uploads);
+  return { ...deleted, 'abandoned uploads': removed };
+}

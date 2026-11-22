@@ -18,6 +18,8 @@ import { OrdersRepository } from '../../src/orders/orders.repository.js';
 import { ProductsRepository } from '../../src/products/products.repository.js';
 import { closeRedis, createQueueClient, createWorkerClient } from '../../src/redis/redis-clients.js';
 import type { Redis } from 'ioredis';
+import { createS3Client } from '../../src/storage/s3-client.js';
+import { FilesRepository } from '../../src/uploads/files.repository.js';
 import { aProduct, aUser, anOrder } from './testkit/builders.js';
 import { startTestDatabase, type TestDatabase } from './testkit/postgres.js';
 import { startTestQueue, type TestRedis } from './testkit/redis.js';
@@ -124,7 +126,13 @@ describe('Jobs queue (BullMQ)', () => {
     startWorker(async (job) => {
       if (job.name === CLEANUP) {
         runs++;
-        return cleanup(db.app);
+        // No files in this database: the S3 client (a dead endpoint) is never called.
+        return cleanup(db.app, {
+          files: new FilesRepository(db.app.manager),
+          s3: createS3Client({ endpoint: 'http://127.0.0.1:1', region: 'garage', accessKeyId: 'x', secretAccessKey: 'x', bucket: 'test-files' }),
+          bucket: 'test-files',
+          log: () => {},
+        });
       }
     });
     await new Promise((resolve) => setTimeout(resolve, 3_500));

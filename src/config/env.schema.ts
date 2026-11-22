@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { checkJwtKeys, jwtEnvShape } from './jwt-keys.js';
+import { storageEnvShape } from './storage.js';
 
 // What every process needs: the API, the relay, the consumer, the worker.
 export const envSchema = z.object({
@@ -20,12 +21,18 @@ export const envSchema = z.object({
 
 export type Env = z.infer<typeof envSchema>;
 
-// The API on top of that: the JWT keys (decoded to KeyObjects, checked as a pair) and
-// the refresh-token pepper. The relay, the consumer and the worker don't sign tokens,
-// so they don't need them.
-export const apiEnvSchema = envSchema.extend(jwtEnvShape).superRefine(checkJwtKeys);
+// The API on top of that: the JWT keys (decoded to KeyObjects, checked as a pair), the
+// refresh-token pepper, and the object store (HW#26). The relay, the consumer and the
+// worker neither sign tokens nor touch files, so they don't need them.
+export const apiEnvSchema = envSchema.extend(jwtEnvShape).extend(storageEnvShape).superRefine(checkJwtKeys);
 
 export type ApiEnv = z.infer<typeof apiEnvSchema>;
+
+// The BullMQ worker: the shared variables and the object store, for the abandoned-upload
+// cleanup (HW#26), which deletes objects.
+export const workerEnvSchema = envSchema.extend(storageEnvShape);
+
+export type WorkerEnv = z.infer<typeof workerEnvSchema>;
 
 // Each broken variable by name, with what's wrong. Never the value: the messages are
 // ours or zod's ("expected string, received undefined", "Invalid URL"), and the
@@ -42,4 +49,6 @@ function parseEnv<T>(schema: z.ZodType<T>, env: Record<string, unknown>): T {
 export const validate = (env: Record<string, unknown>): Env => parseEnv(envSchema, env);
 
 export const validateApiEnv = (env: Record<string, unknown>): ApiEnv => parseEnv(apiEnvSchema, env);
+
+export const validateWorkerEnv = (env: Record<string, unknown>): WorkerEnv => parseEnv(workerEnvSchema, env);
 

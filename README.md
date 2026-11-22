@@ -6,7 +6,56 @@
 
 ## Grading
 
-HW#24 (authentication: JWT, refresh, logout, roles and ownership). From a fresh clone, in the repository root (where `package.json` is). Nothing needs to be running but Docker: each demo builds, applies pending migrations, starts the app in its own process on a random port, creates its own users (and, in `demo:rbac`, a product and an order), and deletes them at the end, Ctrl+C included. See [Auth](#auth).
+HW#26 (files: object storage, presigned uploads, multipart, a caching edge). From a fresh clone, in the repository root (where `package.json` is). Nothing needs to be running but Docker; stop any other copy of this stack first, since the host ports are fixed. Each demo builds, applies pending migrations, creates its own users under its own name prefix and removes everything they own at the start and at the end, Ctrl+C included. See [Files](#files).
+
+What the block sets, and why:
+- **`COMPOSE_PROJECT_NAME`:** a separate Compose project, so the clone gets fresh volumes and `docker compose down -v` can't touch another copy's data.
+- **`docker compose up -d --wait`:** every service, including Garage (the S3-compatible store) and `garage-edge-key` (it gives the edge its read-only key and reports healthy once that's done).
+- **The five database, broker and Redis URLs, `SKIP_VAULT=1`, `secrets/db_password` and the JWT values:** as in HW#24 (below). The JWT values are generated on the spot by [scripts/generate-jwt-keys.mjs](scripts/generate-jwt-keys.mjs): an EC P-256 pair, a kid of the form `<env>-<yyyy>-<mm>`, a 32-byte pepper. Nothing is printed.
+- **The five `S3_*` values and the two `EDGE_S3_*` keys:** the store's address and the dev-only bootstrap credentials committed in [docker-compose.yml](docker-compose.yml) (Garage creates the app's key and the bucket from them, and `garage-edge-key` imports the edge's read-only key). Not secrets. Without the `EDGE_S3_*` pair, `demo:cdn` stops at setup and names the missing variable.
+
+```bash
+export COMPOSE_PROJECT_NAME=m_api_grading
+docker compose up -d --wait
+
+export DB_URL=postgres://app_user@localhost:21111/shop
+export MIGRATIONS_DB_URL=postgres://admin:admin-bootstrap-only@localhost:21110/shop
+export RABBITMQ_URL=amqp://app:rabbitmq-dev-only@127.0.0.1:21113
+export REDIS_CACHE_URL=redis://127.0.0.1:21115
+export REDIS_QUEUE_URL=redis://127.0.0.1:21116
+export SKIP_VAULT=1
+mkdir -p secrets && printf 'app-v1-password' > secrets/db_password
+eval "$(node scripts/generate-jwt-keys.mjs grader | sed 's/^/export /')"
+export JWT_KID=grader-2026-11
+export S3_ENDPOINT=http://127.0.0.1:21117
+export S3_REGION=garage
+export S3_ACCESS_KEY_ID=GK11af531b79412bf2c74a8cba
+export S3_SECRET_ACCESS_KEY=0689921fc5c9befe010e47aa684a1b369453a110be5401c9bb8a40ce44fc62b9
+export S3_BUCKET=hw26-files
+export EDGE_S3_ACCESS_KEY_ID=GK7082f94f405bed0b295b08df
+export EDGE_S3_SECRET_ACCESS_KEY=a49bb7af817d425e0b2754c7c7ec5a93a9baf8cae8751a4d018cc06e3c2630ce
+
+npm ci
+
+npm run demo:upload; echo "exit=$?"
+npm run demo:multipart; echo "exit=$?"
+npm run demo:multipart; echo "exit=$?"
+npm run demo:cdn; echo "exit=$?"
+```
+
+| Demo | stdout (these lines, one per line) | Takes, with the build |
+|---|---|---|
+| `demo:upload` | `intent=200` `key-from-server=1` `api-alive=0` `put-offline=200` `commit=200` `commit-without-bytes=409` `tampered=403` **`expired=400`** | ~8 s |
+| `demo:multipart` | `head-before-complete=404` `resumed-parts=1` `complete=200` `size-match=1` `etag-multipart=1` | ~5 s |
+| `demo:cdn` | `direct=403` `edge-miss=200` `edge-hit=200` `cache-hit=1` `new-name=1` `new-url=200` `content-changed=1` | ~4 s |
+
+> **To the grader: `expired=400`, not `expired=403`.** Criterion 3 checks for `expired=403`. The local store, Garage, refuses an expired presigned URL with **400** (`InvalidRequest`, "Date is too old"), where AWS answers 403 (`AccessDenied`). The demo prints the store's real status and treats 400 or 403 as "refused for expiry"; it doesn't rewrite the number. Every other line matches the criteria exactly. LocalStack was tested as an alternative: its current image won't start without a LocalStack account token, and its last token-free release (4.14.0) answers 403 for expired URLs but serves anonymous reads (`anonymous-get=200`), which would break `direct=403`. Details in [Files](#files).
+
+Exit codes: `0` every line as expected, `1` an invariant broke (the line is still printed, and stderr says `INVARIANT <key>: expected …, got …`), `2` setup failed. Each demo can be rerun at once and prints the same lines. Measured on a fresh clone with empty volumes and only the variables above. Afterwards, `docker compose down -v` (with the same `COMPOSE_PROJECT_NAME`) removes that copy's containers and volumes.
+
+### HW#24 grading (historical): auth
+
+HW#24 (authentication: JWT, refresh, logout, roles and ownership), as graded. Since HW#26 the API also requires the five `S3_*` values, so run it after the HW#26 block's exports. From a fresh clone, in the repository root (where `package.json` is). Nothing needs to be running but Docker: each demo builds, applies pending migrations, starts the app in its own process on a random port, creates its own users (and, in `demo:rbac`, a product and an order), and deletes them at the end, Ctrl+C included. See [Auth](#auth).
 
 What the block sets, and why:
 - **`COMPOSE_PROJECT_NAME`:** a separate Compose project, so the clone gets fresh volumes and `docker compose down -v` can never touch another copy's data. The host ports are fixed, so stop any other running copy first.
@@ -364,6 +413,168 @@ Two stores, so not atomic: **Postgres first, then Redis.** If Redis fails, logou
 - **The cap on concurrent password hashes** (2 at once, Argon2id takes 64 MiB each) answers **503 with `Retry-After`** to a login that finds it full, rather than queueing it. Login itself isn't rate-limited.
 
 OWASP Top 10 2025 (#171): A01 Broken Access Control → the role guard, ownership with 403, the filtered list, the user from the token; A04 Cryptographic Failures → ES256 pinned, Argon2id, peppered refresh hashes; A07 Authentication Failures → rotation, reuse detection, logout that ends both tokens; A10 Mishandling of Exceptional Conditions → the denylist fails closed.
+
+## Files
+
+HW#26. Files go from the client straight to an S3-compatible store; the API decides every upload and keeps the list of files in Postgres, and the store carries the bytes. Locally the store is **Garage** (in compose), and a small **edge** process stands in for CloudFront. Code: [src/uploads/](src/uploads/), [src/storage/](src/storage/), [src/edge/](src/edge/), the demos in [src/demo/](src/demo/).
+
+| Variable | Source | Used for |
+|---|---|---|
+| `S3_ENDPOINT` | сховище (`.secrets/infisical.<env>.env`, HW#11) | the store's URL; empty means real AWS (the SDK builds the regional endpoint, and path style is off) |
+| `S3_REGION` | сховище (`.secrets/infisical.<env>.env`, HW#11) | the region every request is signed for; it must be the store's own (Garage: `garage`) |
+| `S3_ACCESS_KEY_ID` | сховище (`.secrets/infisical.<env>.env`, HW#11) | the API's key (read, write) |
+| `S3_SECRET_ACCESS_KEY` | сховище (`.secrets/infisical.<env>.env`, HW#11) | its secret |
+| `S3_BUCKET` | сховище (`.secrets/infisical.<env>.env`, HW#11) | the bucket, `hw26-files` |
+| `EDGE_S3_ACCESS_KEY_ID` | сховище (`.secrets/infisical.<env>.env`, HW#11) | the edge's key: read only |
+| `EDGE_S3_SECRET_ACCESS_KEY` | сховище (`.secrets/infisical.<env>.env`, HW#11) | its secret |
+| `EDGE_PORT` | сховище (`.secrets/infisical.<env>.env`, HW#11) | the edge's port for `npm run edge` (21120); `demo:cdn` picks a free one |
+| `GARAGE_DEFAULT_ACCESS_KEY`, `GARAGE_DEFAULT_SECRET_KEY`, `GARAGE_DEFAULT_BUCKET` | compose ([docker-compose.yml](docker-compose.yml)), dev-only bootstrap values | Garage creates the API's key and the bucket from them at every start |
+| `EDGE_KEY_ID`, `EDGE_SECRET_KEY` | compose, dev-only bootstrap values | `garage-edge-key` imports the edge's key from them |
+| `GARAGE_RPC_SECRET`, `GARAGE_ADMIN_TOKEN` | compose, dev-only bootstrap values | Garage's internal RPC; its admin API (port 3903, not published), used only by `garage-edge-key` |
+| JWT keys in the Grading block | generated on the spot (`scripts/generate-jwt-keys.mjs`) | see [Auth](#auth) |
+
+The API (and the BullMQ worker, for the cleanup) refuses to start without the `S3_*` values and names each missing one. The app's copy of every value comes from the vault; the compose values only bootstrap the dev store, and in the Grading block the same dev values are exported with `SKIP_VAULT=1`.
+
+### How a file gets in
+
+- **`POST /uploads/intent`** `{ filename, contentType, size }` (behind the HW#24 guard):
+  - the type must be on the allowlist (JPEG, PNG, WebP), and the size 1 B to 5 GiB;
+  - **the server builds the key**, `uploads/{userId}/{uuid}.{ext}`, with the extension from the allowlist; nothing from `filename` reaches the key (`../../etc/passwd` included);
+  - a PENDING row in `files`;
+  - under 10 MiB, one presigned PUT with `Content-Type` **signed** (`signableHeaders`: the JS SDK v3 presigner doesn't sign it otherwise, and a PUT with any other type would be accepted); from 10 MiB, a multipart upload.
+- **The PUT** goes straight to the store; the API can be down meanwhile.
+- **`POST /uploads/commit`** `{ fileId }`:
+  - 404 if the file is missing, 403 if it isn't the caller's, 200 again if it's already COMPLETED;
+  - **HeadObject:** no object → **409**; the store unreachable → 503, never 409;
+  - the size must equal the declared one, and the first bytes must really be that image type (`file-type`); otherwise **422**, and the object is deleted;
+  - a multipart file is completed in the store first, from the store's own `ListParts` (never ETags from the client).
+- **`GET /uploads/{id}/parts`** (owner only): after a crash, which parts the store already has, and fresh URLs for the rest.
+- **`GET /files/{id}`**: the HW#24 guard, the owner or an admin, COMPLETED only (PENDING → 409), then **302** to a presigned GET valid 60 s, with `Cache-Control: no-store` on the 302.
+- **Presigned URLs are never logged.** They're bearer tokens; the logs carry the file id and the key.
+- **The cleanup:** HW#23's daily job (03:00, in the worker) removes PENDING rows older than 24 h. Per row: `DELETE … WHERE status = 'PENDING'` first, and only if that deleted it, `AbortMultipartUpload` (for a multipart row) and `DeleteObject`. A file committed while the job runs keeps its row and its object.
+
+### The numbers, and why
+
+| What | Value | Why |
+|---|---|---|
+| upload URL (single PUT) | **300 s** | enough to start a photo upload from a form; a leaked URL is soon useless |
+| download URL (behind the 302) | **60 s** | only has to outlive the redirect; revoking access is a change in our data, and the next request gets 403 |
+| multipart part URLs | **1 h** | a large upload on a slow link outlasts 5 minutes; a resume signs fresh ones |
+| multipart threshold | **10 MiB** | a typical photo stays one PUT; anything worth resuming is split, into at least two 5 MiB parts |
+| part size | `max(5 MiB, ceil(size / 10,000))`, rounded up to a whole MiB | the smallest part size that keeps the count within S3's 10,000 |
+| largest file | **5 GiB** | far above any image; checked at intent, after the part-count check |
+| abandoned-upload threshold | **24 h** | far past any upload in progress |
+| lifecycle rule | abort unfinished multipart uploads after **7 days** | the backstop for uploads with no row |
+| edge cache | **64 MB** in memory, **8 MB** per file, LRU by bytes | CSS, JS and images; one big object can't evict the rest |
+| a missing asset at the edge | remembered **10 s** | absorbs a burst for a missing name; a new upload shows up within seconds |
+| asset names | `assets/<name>.<first 8 hex of SHA-256(content)><ext>` | the same content always gets the same name |
+
+The part size, worked out:
+- **11 MiB:** `ceil(11,534,336 / 10,000)` = 1,154 B, so 5 MiB parts: **5 + 5 + 1 = 3 parts**.
+- **60 GB:** `ceil(60,000,000,000 / 10,000)` = 6,000,000 B, rounded up to **6 MiB**: **9,537 parts**. Refused anyway by the 5 GiB maximum.
+- **A fixed 5 MiB part** can't carry more than 10,000 × 5 MiB ≈ 48.8 GiB, and intent's part-count check refuses more (measured: 60 GB at 5 MiB → 400 "would need more than 10000 parts").
+
+### The cache layer: the CDN form we chose
+
+A **local edge** ([src/edge/main.ts](src/edge/main.ts), `npm run edge`, port 21120) in front of the private bucket. Only `assets/` is ever served there; private files keep going through `GET /files/{id}`.
+
+| Locally | In AWS |
+|---|---|
+| Garage | S3 |
+| the edge | CloudFront |
+| the edge's own read-only key | OAC (Origin Access Control: CloudFront's signed requests to the bucket) |
+| `assets/manifest.json` (`no-cache`) | the HTML entry point, which points at the current hashed names |
+| Garage refusing anonymous requests, no website mode | Block Public Access |
+
+- **Hit or miss:** a fresh copy → `X-Cache: HIT`; otherwise GetObject with the edge's key, store it, `X-Cache: MISS`. A stale copy is revalidated with `If-None-Match` (`X-Cache: REVALIDATED`).
+- **How long a copy is fresh comes only from the object's own `Cache-Control`,** set at upload. No `Cache-Control`, `no-store` or `private` → never cached. The edge has no TTL of its own, so a missing header fails here too, not first on a real CDN.
+- **The cache key is the path only:** query strings are ignored, so `?v=1`, `?v=2`… can't turn one asset into endless misses.
+- **Paths are decoded and normalized, then must start with `assets/`:** `/assets/../uploads/…` and its encoded forms get 404.
+- **Publishing** (`npm run assets:publish -- <file>`): the content's hash goes into the name, with `Cache-Control: public, max-age=31536000, immutable`. New content gets a new name and the old object stays, so **nothing is ever invalidated**. Then the manifest is pointed at the new name.
+
+**The AWS form** (configuration, graded as such):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowCloudFrontServicePrincipalReadOnly",
+      "Effect": "Allow",
+      "Principal": { "Service": "cloudfront.amazonaws.com" },
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::hw26-files/assets/*",
+      "Condition": {
+        "StringEquals": { "AWS:SourceArn": "arn:aws:cloudfront::111122223333:distribution/EDFDVBD6EXAMPLE" }
+      }
+    }
+  ]
+}
+```
+
+- **The `AWS:SourceArn` condition is mandatory:** the principal is the CloudFront *service*, shared by every distribution in the world, so without it anyone's distribution could read the bucket.
+- **The bucket:** Block Public Access on; Object Ownership "Bucket owner enforced"; the normal bucket endpoint, **not the website endpoint** (OAC doesn't work with it).
+- **The distribution:** an OAC on the S3 origin; a cache policy that keys on the path only and honours the origin's `Cache-Control`; a behavior for `/assets/*` only.
+- **`Resource` is `assets/*`,** so `uploads/` stays out of CloudFront's reach even if a behavior is misconfigured.
+
+**Private content through the CDN (the plan, not built):** files only some users may see (paid content, invoices) would go through CloudFront with **its own** signatures. A key group holds our public key; the API checks the user, then signs a **CloudFront signed URL** (one file) or **signed cookies** (many files, like a video's segments) with the private key from the vault; the edge verifies them without calling the API or S3. An S3 presigned URL can't do this job: users talk to CloudFront, and S3 only sees CloudFront's OAC-signed requests. Until then, private files use `GET /files/{id}`.
+
+### The demos, and their numbers
+
+```
+demo:upload      intent=200 key-from-server=1 api-alive=0 put-offline=200 commit=200 commit-without-bytes=409 tampered=403 expired=400
+demo:multipart   head-before-complete=404 resumed-parts=1 complete=200 size-match=1 etag-multipart=1
+demo:cdn         direct=403 edge-miss=200 edge-hit=200 cache-hit=1 new-name=1 new-url=200 content-changed=1
+```
+
+- **`demo:upload`:**
+  - intent with `filename: "../../etc/passwd"`, and the key checked;
+  - the API stopped (`api-alive=0`, checked with a raw socket);
+  - the PUT from a child process whose whole environment is `PUT_URL`, `PUT_CONTENT_TYPE` and `PUT_FILE` (0 `S3_*`/`AWS_*` variables);
+  - the API restarted on a new port, then commit;
+  - a commit with no PUT;
+  - a URL with another key in its path;
+  - a URL signed for 2 s and used 4 s later.
+- **`demo:multipart`:**
+  - an 11 MiB file in 3 parts;
+  - a child uploads parts 1 and 2, says so on stdout, and is SIGKILLed;
+  - HeadObject → 404;
+  - a new child resumes through `GET /uploads/{id}/parts` and sends 1 part;
+  - commit; the size matches, and the ETag ends with `-3` (it isn't the file's MD5).
+- **`demo:cdn`:**
+  - the edge as its own process, with only its own settings and key;
+  - version 1 published; direct anonymous GET on the store → 403; through the edge MISS, then HIT;
+  - version 2 under a new name, served with the new content.
+
+Each demo's users share an email prefix (`demo-upload-…`), and everything they own (unfinished uploads, objects, rows, the users) is swept at the start and at the end, so even a hard-killed run leaves nothing for the next one.
+
+Also: `npm run smoke:s3` (put, head, anonymous GET 403, delete), `npm run proof:presign` (an expired URL refused, edited URLs 403, reordered parameters still 200), `npm run proof:cleanup` (the abandoned-upload cleanup, with a commit landing mid-run), `npm run storage:lifecycle` (sets and reads back the abort rule).
+
+### Garage vs AWS
+
+Measured on Garage v2.5.0; the AWS column is AWS's documented behaviour.
+
+| | AWS S3 | Garage |
+|---|---|---|
+| **an expired presigned URL** | 403 `AccessDenied` | **400 `InvalidRequest`** "Date is too old" |
+| an edited presigned URL (key or expiry) | 403 `SignatureDoesNotMatch` | 403 `AccessDenied` "Invalid signature" |
+| a client signing for the wrong region | refused | 400 `AuthorizationHeaderMalformed`, naming the expected scope; on HEAD (no body) the SDK shows only `UnknownError`. **An unknown error on HEAD: check the region first.** |
+| anonymous reads | per bucket policy; Block Public Access stops them | never on the S3 port; public only through website mode, which opens **the whole bucket**, not a prefix |
+| a part under 5 MiB that isn't the last | `EntityTooSmall` at Complete | accepted (our size check still caught the wrong result) |
+| DeleteObject on a key with an upload in progress | the upload stays, invisible and billed, until aborted | the upload is removed too (so the explicit abort in our cleanup is for AWS) |
+
+**About `expired`:** criterion 3 checks for `expired=403`; Garage refuses expired URLs with 400. `demo:upload` prints the store's real status and treats 400 or 403 as "refused for expiry". **LocalStack was tested instead:** its current image exits at start ("License activation failed! … set the LOCALSTACK_AUTH_TOKEN variable"), so a grader without an account can't run it; its last token-free release, 4.14.0, answers 403 for an expired URL but serves anonymous reads (`anonymous-get=200`), which breaks `direct=403`, and it's archived. MinIO's free edition has been unmaintained since December 2025.
+
+### Known limits and non-goals
+
+- **CORS:** a browser uploading straight to the store needs a CORS rule on the bucket (the site's origin, `PUT`, the `Content-Type` header). The Node demos don't. With multipart, reading ETags in the browser would also need `ExposeHeaders: ETag`; our commit reads `ListParts` on the server instead.
+- **No Idempotency-Key on intent:** a double tap makes two PENDING rows; the unused one is never committed, and the cleanup job removes it after 24 h (row and object). A lifecycle rule couldn't: it acts on objects, never on rows.
+- **The edge's key reads the whole bucket on Garage:** read-only (PutObject and DeleteObject get 403), but Garage grants per bucket, not per prefix, so it can read `uploads/` too; only the edge's code keeps it to `assets/`. On AWS the bucket policy above restricts it to `assets/*`.
+- **The lifecycle rule is reapplied at every API start** because the dev store keeps its data on a tmpfs and forgets its configuration on restart. On real S3 it's set once, as infrastructure (Terraform, CloudFormation or a setup script); don't copy the startup step there.
+- **Dev data in the store vanishes whenever the `garage` container restarts** (the tmpfs). The `files` rows in Postgres stay, so a restart leaves COMPLETED rows pointing at objects that are gone. Right for grading, wrong for anything else.
+- **Garage's 1 GB tmpfs** is in RAM.
+- **The edge cache is in memory** and lost on restart; fine for an edge, since the origin has everything.
+- **Private files never go through the edge:** a shared cache would hand one user's file to anyone. Keep `/files/` out of any CDN cache behavior too: its 302 carries a bearer URL (it's sent with `no-store`, but a "cache everything" rule could override that).
 
 ## TypeORM data layer
 
@@ -1316,6 +1527,7 @@ Environment variables are validated on startup by [src/config/env.schema.ts](src
 - **`REDIS_CACHE_URL`, `REDIS_QUEUE_URL`:** the two Redis instances (HW#23), `redis-cache` on 127.0.0.1:21115 and `redis-queue` on 127.0.0.1:21116. The dev instances have no password and listen on 127.0.0.1 only; production would put Redis on a private network with `AUTH` or ACLs (a user per service, limited to its commands and keys), with the credentials only in the vault.
 - **Sessions and the rate limit (HW#23):** both on `redis-queue`; see [the Redis section](#redis-кеш-сесії-ліміти-черга-hw23-cache-sessions-rate-limit-queue). `POST /sessions` is a stand-in that HW#24's login replaces (see [Auth](#auth)): **never ship it.**
 - **The JWT variables (HW#24):** `JWT_PRIVATE_KEY`, `JWT_PUBLIC_KEY`, `JWT_KID`, `REFRESH_TOKEN_PEPPER`, from the per-environment store; see [Auth](#auth).
+- **The object store (HW#26):** `S3_ENDPOINT`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET` (the API and the worker), and `EDGE_PORT`, `EDGE_S3_ACCESS_KEY_ID`, `EDGE_S3_SECRET_ACCESS_KEY` (the edge), from the per-environment store; see [Files](#files).
 - **`CLEANUP_EVERY_MS`** (optional, `.env.example`): the BullMQ cleanup scheduler runs daily at 03:00; a number of ms (at least 1000) makes it run that often instead, for a demo only.
 
 Copy [.env.example](.env.example) to `.env` and adjust as needed:
