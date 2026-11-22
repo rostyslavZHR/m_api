@@ -5,7 +5,9 @@
 //
 // Applied idempotently (Put replaces the whole configuration with the same one) by the
 // API at startup: the dev store keeps its data on a tmpfs, so a restart of the store
-// forgets the bucket's configuration along with everything else.
+// forgets the bucket's configuration along with everything else. That's a workaround for
+// this dev store only: on real S3 the rule is set once, as infrastructure (Terraform,
+// CloudFormation, a setup script), and stays; the app shouldn't own it there.
 import { GetBucketLifecycleConfigurationCommand, PutBucketLifecycleConfigurationCommand, type S3Client } from '@aws-sdk/client-s3';
 
 export const ABORT_INCOMPLETE_RULE_ID = 'abort-incomplete-multipart';
