@@ -168,6 +168,8 @@ services:
       GARAGE_DEFAULT_ACCESS_KEY: GK11af531b79412bf2c74a8cba
       GARAGE_DEFAULT_SECRET_KEY: 0689921fc5c9befe010e47aa684a1b369453a110be5401c9bb8a40ce44fc62b9
       GARAGE_DEFAULT_BUCKET: hw26-files
+      # The admin API (port 3903, not published: only garage-edge-key below calls it).
+      GARAGE_ADMIN_TOKEN: jH9WxfAb9S5njl9VRL9108X55voCjtcwyg3f6eY-3dk
     volumes:
       - ./garage/garage.toml:/etc/garage.toml:ro
     # At least 1g: a full tmpfs kills the store mid-run.
@@ -182,6 +184,31 @@ services:
       test: ["CMD", "/garage", "bucket", "info", "hw26-files"]
       interval: 2s
       timeout: 5s
+      retries: 30
+
+  # The edge's own read-only key (Phase E), set up after every store start: the store
+  # bootstraps only one key (the app's), and its data is on a tmpfs. It imports the key if
+  # it's missing and grants it read on the bucket (garage/edge-key.sh), then stays up and
+  # reports healthy, so `up --wait` waits for the key (an exited one-shot fails --wait). Dev-only bootstrap values, like the ones above;
+  # the edge reads its copy from the secrets store (EDGE_S3_ACCESS_KEY_ID / _SECRET_ACCESS_KEY).
+  garage-edge-key:
+    image: curlimages/curl:8.23.0
+    depends_on:
+      garage:
+        condition: service_healthy
+        restart: true
+    environment:
+      GARAGE_ADMIN_TOKEN: jH9WxfAb9S5njl9VRL9108X55voCjtcwyg3f6eY-3dk
+      EDGE_KEY_ID: GK7082f94f405bed0b295b08df
+      EDGE_SECRET_KEY: a49bb7af817d425e0b2754c7c7ec5a93a9baf8cae8751a4d018cc06e3c2630ce
+      BUCKET: hw26-files
+    volumes:
+      - ./garage/edge-key.sh:/edge-key.sh:ro
+    entrypoint: ["sh", "/edge-key.sh"]
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/edge-key-ready"]
+      interval: 1s
+      timeout: 2s
       retries: 30
 
 volumes:

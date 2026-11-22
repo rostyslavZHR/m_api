@@ -23,4 +23,9 @@ api_bind_addr = "[::]:3900"
 root_domain = ".s3.garage.localhost"
 
 # No [s3_web] section: no website endpoint, so no bucket can be served anonymously.
-# No [admin] section: the admin API isn't needed, so it isn't listening.
+
+# The admin API, for the garage-edge-key one-shot only (the edge's read-only key). Not
+# published to the host; the token comes from GARAGE_ADMIN_TOKEN in docker-compose.yml.
+[admin]
+api_bind_addr = "[::]:3903"
+
