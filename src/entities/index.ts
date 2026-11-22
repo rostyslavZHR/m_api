@@ -10,12 +10,14 @@ import { ProcessedMessageEntity } from './processed-message.entity.js';
 import { IdempotencyKeyEntity } from './idempotency-key.entity.js';
 import { InvoiceEmailEntity } from './invoice-email.entity.js';
 import { RefreshTokenEntity } from './refresh-token.entity.js';
+import { FileEntity } from './file.entity.js';
 
-export { JobEntity, OrderItemEntity, OrderEntity, ProductEntity, UserEntity, OrderEventEntity, InvoiceEntity, OutboxEntity, ProcessedMessageEntity, IdempotencyKeyEntity, InvoiceEmailEntity, RefreshTokenEntity };
+export { JobEntity, OrderItemEntity, OrderEntity, ProductEntity, UserEntity, OrderEventEntity, InvoiceEntity, OutboxEntity, ProcessedMessageEntity, IdempotencyKeyEntity, InvoiceEmailEntity, RefreshTokenEntity, FileEntity };
 export { ORDER_STATUSES, type OrderStatus } from './order.entity.js';
 export { JOB_STATUSES, type JobStatus } from './job.entity.js';
 export { USER_ROLES, type UserRole } from './user.entity.js';
+export { FILE_STATUSES, type FileStatus } from './file.entity.js';
 
 // Every entity the DataSource registers. An entity missing here is invisible to
 // migration:generate, so the list lives next to the classes.
-export const entities = [UserEntity, ProductEntity, OrderEntity, OrderItemEntity, JobEntity, OrderEventEntity, InvoiceEntity, OutboxEntity, ProcessedMessageEntity, IdempotencyKeyEntity, InvoiceEmailEntity, RefreshTokenEntity];
+export const entities = [UserEntity, ProductEntity, OrderEntity, OrderItemEntity, JobEntity, OrderEventEntity, InvoiceEntity, OutboxEntity, ProcessedMessageEntity, IdempotencyKeyEntity, InvoiceEmailEntity, RefreshTokenEntity, FileEntity];

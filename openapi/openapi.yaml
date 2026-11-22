@@ -181,6 +181,103 @@ paths:
         '503':
           $ref: '#/components/responses/AuthUnavailable'
 
+  /uploads/intent:
+    post:
+      operationId: createUploadIntent
+      summary: Start an upload (a pending file row and a presigned PUT URL)
+      description: |
+        The server builds the object key (uploads/{userId}/{uuid}.{ext}, the extension from
+        the content type), records a PENDING file and returns a presigned PUT URL valid for
+        5 minutes. The client PUTs the bytes straight to the store, with exactly the
+        returned headers (Content-Type is signed: another value gets 403), then calls
+        /uploads/commit. The filename is accepted and ignored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UploadIntentRequest'
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The pending file and how to upload it
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadIntent'
+        '400':
+          description: Invalid body, a content type outside the allowlist, or a size outside 1 B–10 MiB
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/AuthUnavailable'
+
+  /uploads/commit:
+    post:
+      operationId: commitUpload
+      summary: Confirm an upload (complete the file once its bytes are in the store)
+      description: |
+        Completes the file only if its object is in the store with the declared size and is
+        really of the declared type (magic bytes). Idempotent: a COMPLETED file is returned
+        again as it is. An object with the wrong size or type is removed, and the file stays
+        PENDING.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UploadCommitRequest'
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The completed file
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/File'
+        '400':
+          description: Invalid body
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: No such file
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '409':
+          description: Nothing was uploaded for this file yet (PUT it first, then commit again)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: The uploaded object's size or type doesn't match what intent declared; the object was removed
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          description: |
+            The token check (see AuthUnavailable) or the file store couldn't be reached; retry
+            shortly.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
   /auth/me:
     get:
       operationId: getMe
@@ -722,6 +819,86 @@ components:
                 type: integer
             required: [product_id, title, orders]
       required: [id, title, description, price_cents, stock, in_stock, sales, bought_together]
+
+    UploadIntentRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        filename:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: The client's name for the file. Not used in the key, not stored.
+        contentType:
+          type: string
+          # The allowlist: ALLOWED_TYPES in src/uploads/uploads.service.ts.
+          enum: [image/jpeg, image/png, image/webp]
+        size:
+          type: integer
+          minimum: 1
+          maximum: 10485760
+          description: Bytes. The committed object must have exactly this size.
+      required: [filename, contentType, size]
+
+    UploadIntent:
+      type: object
+      properties:
+        fileId:
+          type: string
+          format: uuid
+        key:
+          type: string
+        uploadUrl:
+          type: string
+          format: uri
+          description: A presigned PUT URL. A bearer token until expiresAt; don't log it.
+        method:
+          type: string
+          enum: [PUT]
+        headers:
+          type: object
+          description: Send exactly these headers with the PUT.
+          properties:
+            Content-Type:
+              type: string
+          required: [Content-Type]
+        expiresAt:
+          type: string
+          format: date-time
+      required: [fileId, key, uploadUrl, method, headers, expiresAt]
+
+    UploadCommitRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        fileId:
+          type: string
+          format: uuid
+      required: [fileId]
+
+    File:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        key:
+          type: string
+        status:
+          type: string
+          enum: [PENDING, COMPLETED]
+        contentType:
+          type: string
+        size:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+      required: [id, key, status, contentType, size, createdAt, completedAt]
 
     AuthUser:
       type: object
