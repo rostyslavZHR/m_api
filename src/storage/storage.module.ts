@@ -1,8 +1,9 @@
-import { Global, Inject, Module, type OnApplicationShutdown } from '@nestjs/common';
+import { Global, Inject, Logger, Module, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { S3Client } from '@aws-sdk/client-s3';
 import type { ApiEnv } from '../config/env.schema.js';
 import { type StorageConfig, storageConfigOf } from '../config/storage.js';
+import { applyLifecycle } from './lifecycle.js';
 import { createS3Client } from './s3-client.js';
 
 // Injection tokens: @Inject(S3) for the one shared client, @Inject(STORAGE_CONFIG) for
@@ -33,8 +34,26 @@ export const STORAGE_CONFIG = Symbol('STORAGE_CONFIG');
   ],
   exports: [S3, STORAGE_CONFIG],
 })
-export class StorageModule implements OnApplicationShutdown {
-  constructor(@Inject(S3) private readonly s3: S3Client) {}
+export class StorageModule implements OnApplicationBootstrap, OnApplicationShutdown {
+  private readonly logger = new Logger(StorageModule.name);
+
+  constructor(
+    @Inject(S3) private readonly s3: S3Client,
+    @Inject(STORAGE_CONFIG) private readonly storage: StorageConfig,
+  ) {}
+
+  // The bucket's lifecycle rule (abort unfinished multipart uploads after 7 days), set at
+  // every start: idempotent, and the dev store forgets it on a restart (tmpfs). A failure
+  // doesn't stop the API (the store may come up later); it's logged, and our own daily
+  // cleanup still aborts the uploads it has rows for.
+  async onApplicationBootstrap(): Promise<void> {
+    try {
+      await applyLifecycle(this.s3, this.storage.bucket);
+      this.logger.log(`bucket ${this.storage.bucket}: lifecycle rule set (abort unfinished multipart uploads after 7 days)`);
+    } catch (error) {
+      this.logger.warn(`bucket ${this.storage.bucket}: lifecycle rule not set (${(error as Error).name}: ${(error as Error).message})`);
+    }
+  }
 
   // Closes the client's keep-alive sockets, so the process can exit.
   onApplicationShutdown(): void {

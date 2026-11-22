@@ -8,6 +8,8 @@ export interface NewFile {
   contentType: string;
   // The declared size, in bytes.
   size: number;
+  // The multipart upload's id; absent for a single PUT.
+  uploadId?: string;
 }
 
 // What the cleanup needs of an abandoned upload.

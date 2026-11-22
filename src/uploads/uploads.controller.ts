@@ -1,4 +1,4 @@
-import { Body, Controller, HttpCode, Post } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, Post } from '@nestjs/common';
 import { CurrentUser } from '../auth/current-user.decorator.js';
 import type { AuthUser } from '../auth/tokens.js';
 import { type UploadIntentRequest, UploadsService } from './uploads.service.js';
@@ -14,6 +14,13 @@ export class UploadsController {
   @HttpCode(200)
   intent(@CurrentUser() user: AuthUser, @Body() body: UploadIntentRequest) {
     return this.uploads.intent(user, body);
+  }
+
+  // Resume a multipart upload (#183): which parts the store already has, and fresh URLs
+  // for the missing ones.
+  @Get(':id/parts')
+  parts(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    return this.uploads.resumeParts(user, id);
   }
 
   @Post('commit')

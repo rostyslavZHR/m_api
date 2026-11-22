@@ -10,6 +10,7 @@
 //      row is the object deleted. A row a commit completed in between survives, and so
 //      does its object.
 import { DeleteObjectCommand, type S3Client } from '@aws-sdk/client-s3';
+import { abortMultipartUpload, isNoSuchUpload } from '../storage/multipart.js';
 import type { AbandonedFile, FilesRepository } from './files.repository.js';
 
 // An upload URL lives 5 minutes; a day is far past any upload still in progress.
@@ -44,10 +45,17 @@ export async function removeAbandoned({ files, s3, bucket, log }: CleanupDeps, a
       log(`abandoned uploads: file ${file.id} was completed meanwhile, kept`);
       continue;
     }
-    // The row is gone, so nothing can commit it now. DeleteObject on a key with no object
-    // still succeeds (204), so "never uploaded" needs no special case. Multipart rows
-    // (upload_id) will need AbortMultipartUpload first (Phase D).
+    // The row is gone, so nothing can commit it now. A multipart upload is aborted first:
+    // its parts are invisible to DeleteObject and stay billed until aborted (#183). An
+    // upload the store no longer has (completed, aborted, expired) is fine. Then
+    // DeleteObject: on a key with no object it still succeeds (204), so "never uploaded"
+    // needs no special case.
     try {
+      if (file.uploadId) {
+        await abortMultipartUpload(s3, { bucket, key: file.key, uploadId: file.uploadId }).catch((error: unknown) => {
+          if (!isNoSuchUpload(error)) throw error;
+        });
+      }
       await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: file.key }));
       result.removed++;
     } catch (error) {
