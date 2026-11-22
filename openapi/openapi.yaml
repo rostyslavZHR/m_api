@@ -278,6 +278,61 @@ paths:
               schema:
                 $ref: '#/components/schemas/Problem'
 
+  /files/{id}:
+    get:
+      operationId: downloadFile
+      summary: Download a file (302 to a 60-second presigned GET)
+      description: |
+        Checks the caller on every request (the owner, or an admin), then redirects to a
+        fresh presigned GET valid for 60 seconds. Only a COMPLETED file can be read. The
+        302 is never cached (Cache-Control: no-store): its Location is a bearer URL.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      security:
+        - bearerAuth: []
+      responses:
+        '302':
+          description: Redirect to the file's bytes in the store
+          headers:
+            Location:
+              description: A presigned GET URL, valid for 60 seconds. A bearer token; don't log it.
+              schema:
+                type: string
+                format: uri
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+        '400':
+          description: The id isn't a uuid
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: No such file
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '409':
+          description: The file isn't uploaded yet (PENDING)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          $ref: '#/components/responses/AuthUnavailable'
+
   /auth/me:
     get:
       operationId: getMe

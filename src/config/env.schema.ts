@@ -28,6 +28,12 @@ export const apiEnvSchema = envSchema.extend(jwtEnvShape).extend(storageEnvShape
 
 export type ApiEnv = z.infer<typeof apiEnvSchema>;
 
+// The BullMQ worker: the shared variables and the object store, for the abandoned-upload
+// cleanup (HW#26), which deletes objects.
+export const workerEnvSchema = envSchema.extend(storageEnvShape);
+
+export type WorkerEnv = z.infer<typeof workerEnvSchema>;
+
 // Each broken variable by name, with what's wrong. Never the value: the messages are
 // ours or zod's ("expected string, received undefined", "Invalid URL"), and the
 // issue's input isn't printed.
@@ -43,4 +49,6 @@ function parseEnv<T>(schema: z.ZodType<T>, env: Record<string, unknown>): T {
 export const validate = (env: Record<string, unknown>): Env => parseEnv(envSchema, env);
 
 export const validateApiEnv = (env: Record<string, unknown>): ApiEnv => parseEnv(apiEnvSchema, env);
+
+export const validateWorkerEnv = (env: Record<string, unknown>): WorkerEnv => parseEnv(workerEnvSchema, env);
 

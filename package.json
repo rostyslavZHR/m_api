@@ -38,6 +38,8 @@
     "demo:ratelimit": "bash scripts/with-secrets.sh dev sh -c 'npm run --silent build && node --env-file-if-exists=.env dist/demo/ratelimit.js'",
     "demo:queue": "bash scripts/with-secrets.sh dev sh -c 'npm run --silent build && node --env-file-if-exists=.env dist/demo/queue.js'",
     "smoke:s3": "bash scripts/with-secrets.sh dev sh -c 'npm run --silent build && node --env-file-if-exists=.env dist/demo/s3-smoke.js'",
+    "proof:presign": "bash scripts/with-secrets.sh dev sh -c 'npm run --silent build && node --env-file-if-exists=.env dist/demo/presign-proofs.js'",
+    "proof:cleanup": "bash scripts/with-secrets.sh dev sh -c 'npm run --silent build && node --env-file-if-exists=.env dist/demo/cleanup-proof.js'",
     "demo:auth": "bash scripts/with-secrets.sh dev sh -c 'npm run --silent build && node --env-file-if-exists=.env dist/demo/auth.js'",
     "demo:reuse": "bash scripts/with-secrets.sh dev sh -c 'npm run --silent build && node --env-file-if-exists=.env dist/demo/reuse.js'",
     "demo:rbac": "bash scripts/with-secrets.sh dev sh -c 'npm run --silent build && node --env-file-if-exists=.env dist/demo/rbac.js'",

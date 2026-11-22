@@ -3,7 +3,10 @@
 // killed or scaled on its own.
 import 'reflect-metadata';
 import { type Job, Worker } from 'bullmq';
-import { validate } from '../config/env.schema.js';
+import { validateWorkerEnv } from '../config/env.schema.js';
+import { storageConfigOf } from '../config/storage.js';
+import { createS3Client } from '../storage/s3-client.js';
+import { FilesRepository } from '../uploads/files.repository.js';
 import { createAppDataSource } from '../db/app-data-source.js';
 import { closeRedis, createWorkerClient } from '../redis/redis-clients.js';
 import { cleanup, sendInvoiceEmail } from './handlers.js';
@@ -16,9 +19,13 @@ const log = (message: string) => console.error(`[worker ${process.pid}] ${messag
 const CONCURRENCY = 5;
 
 async function main(): Promise<void> {
-  const env = validate(process.env);
+  const env = validateWorkerEnv(process.env);
   const dataSource = await createAppDataSource(env.DB_URL, { poolSize: CONCURRENCY }).initialize();
   const connection = createWorkerClient(env.REDIS_QUEUE_URL);
+  // The abandoned-upload cleanup deletes objects in the store.
+  const storage = storageConfigOf(env);
+  const s3 = createS3Client(storage);
+  const uploads = { files: new FilesRepository(dataSource.manager), s3, bucket: storage.bucket, log };
 
   // A thrown Error fails the attempt, and BullMQ retries it with the job's backoff.
   const handle = async (job: Job): Promise<unknown> => {
@@ -30,7 +37,7 @@ async function main(): Promise<void> {
         return outcome;
       }
       case CLEANUP: {
-        const deleted = await cleanup(dataSource);
+        const deleted = await cleanup(dataSource, uploads);
         log(`${job.id}: cleanup ${JSON.stringify(deleted)}`);
         return deleted;
       }
@@ -57,6 +64,7 @@ async function main(): Promise<void> {
     log(`${signal}: finishing the jobs in progress`);
     await worker.close();
     await closeRedis(connection);
+    s3.destroy();
     await dataSource.destroy();
     log('stopped');
     process.exit(0);

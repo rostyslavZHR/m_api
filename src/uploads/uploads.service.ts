@@ -13,12 +13,12 @@ import {
   ServiceUnavailableException,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, type S3Client } from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, type S3Client } from '@aws-sdk/client-s3';
 import { fileTypeFromBuffer } from 'file-type';
 import type { AuthUser } from '../auth/tokens.js';
 import type { StorageConfig } from '../config/storage.js';
 import type { FileEntity, FileStatus } from '../entities/index.js';
+import { presignGet, presignPut } from '../storage/presign.js';
 import { S3, STORAGE_CONFIG } from '../storage/storage.module.js';
 import { FilesRepository } from './files.repository.js';
 
@@ -39,6 +39,11 @@ export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 // (it's a bearer token, #181) is soon useless. A larger file would need longer, or
 // multipart (Phase D).
 export const PRESIGN_EXPIRES_SECONDS = 300;
+
+// 60 s for a download (#182): the redirect is followed at once, so the URL only has to
+// outlive that; a leaked one is dead almost immediately, and taking a user's access
+// away (in our data) stops their next click, not a URL valid for days.
+export const DOWNLOAD_EXPIRES_SECONDS = 60;
 
 // What commit reads to recognise the real type (magic bytes). file-type needs at most
 // the first 4100 bytes.
@@ -116,14 +121,13 @@ export class UploadsService {
     const key = `uploads/${user.id}/${id}.${ext}`;
     await this.files.insert({ id, key, ownerId: user.id, contentType, size });
 
-    // Signed locally, no call to the store (#181). ContentType on the command alone isn't
-    // enough: the presigner signs only `host` unless told otherwise (measured: the URL
-    // then accepted a PUT as image/jpeg), so content-type is named in signableHeaders.
-    const uploadUrl = await getSignedUrl(
-      this.s3,
-      new PutObjectCommand({ Bucket: this.storage.bucket, Key: key, ContentType: contentType }),
-      { expiresIn: PRESIGN_EXPIRES_SECONDS, signableHeaders: new Set(['content-type']) },
-    );
+    // Signed locally, no call to the store (#181), with Content-Type signed (presign.ts).
+    const uploadUrl = await presignPut(this.s3, {
+      bucket: this.storage.bucket,
+      key,
+      contentType,
+      expiresIn: PRESIGN_EXPIRES_SECONDS,
+    });
     // The file id and the key, never the URL: it's a bearer token.
     this.logger.log(`intent: file ${id} key ${key} (${contentType}, ${size} B) for user ${user.id}`);
 
@@ -179,11 +183,29 @@ export class UploadsService {
     }
 
     if (!(await this.files.markCompleted({ id: file.id, size: head.ContentLength, completedAt: now }))) {
-      // A parallel commit of the same file won; answer with what it stored.
-      return toView((await this.files.findById(fileId))!);
+      // Not PENDING any more: a parallel commit completed it (answer with that), or the
+      // abandoned-upload cleanup removed the row in between (it then deletes the object).
+      const current = await this.files.findById(fileId);
+      if (!current) throw new NotFoundException(`File ${fileId} was removed as an abandoned upload.`);
+      return toView(current);
     }
     this.logger.log(`commit: file ${file.id} key ${file.key} completed (${head.ContentLength} B)`);
     return toView((await this.files.findById(fileId))!);
+  }
+
+  // GET /files/:id (#182): authorize this request, then hand out a fresh 60-second URL for
+  // the bytes. Revoking access is a change in our data; the next request gets 403. The
+  // owner and admins may read a file; only a COMPLETED one exists for reading.
+  async downloadUrl(user: AuthUser, fileId: string): Promise<string> {
+    const file = await this.files.findById(fileId);
+    if (!file) throw new NotFoundException(`File ${fileId} not found.`);
+    if (file.ownerId !== user.id && user.role !== 'admin') throw new ForbiddenException(`File ${fileId} is not yours.`);
+    if (file.status !== 'COMPLETED') throw new ConflictException(`File ${fileId} isn't uploaded yet (${file.status}).`);
+
+    const url = await presignGet(this.s3, { bucket: this.storage.bucket, key: file.key, expiresIn: DOWNLOAD_EXPIRES_SECONDS });
+    // Who read what: the file id and the key, never the URL.
+    this.logger.log(`download: file ${file.id} key ${file.key} by user ${user.id}`);
+    return url;
   }
 
   // A store call whose failure isn't "no object": logged, then a 503 (the store, not the

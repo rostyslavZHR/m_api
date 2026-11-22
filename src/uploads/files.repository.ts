@@ -1,4 +1,4 @@
-import type { EntityManager } from 'typeorm';
+import { type EntityManager, LessThan } from 'typeorm';
 import { FileEntity } from '../entities/index.js';
 
 export interface NewFile {
@@ -9,6 +9,9 @@ export interface NewFile {
   // The declared size, in bytes.
   size: number;
 }
+
+// What the cleanup needs of an abandoned upload.
+export type AbandonedFile = Pick<FileEntity, 'id' | 'key' | 'uploadId'>;
 
 export interface CompleteFile {
   id: string;
@@ -36,6 +39,30 @@ export class FilesRepository {
       .createQueryBuilder()
       .update(FileEntity)
       .set({ status: 'COMPLETED', size: String(size), completedAt })
+      .where('id = :id AND status = :pending', { id, pending: 'PENDING' })
+      .execute();
+    return result.affected === 1;
+  }
+
+  // Uploads that never completed: PENDING, created before the cutoff. Oldest first, a
+  // batch at a time.
+  findPendingOlderThan(cutoff: Date, limit: number): Promise<AbandonedFile[]> {
+    return this.manager.find(FileEntity, {
+      select: { id: true, key: true, uploadId: true },
+      where: { status: 'PENDING', createdAt: LessThan(cutoff) },
+      order: { createdAt: 'ASC' },
+      take: limit,
+    });
+  }
+
+  // Conditional, like markCompleted: deletes the row only if it's still PENDING. false
+  // means a commit completed it after the cleanup read it: the file stays, and so must
+  // its object.
+  async deleteIfPending(id: string): Promise<boolean> {
+    const result = await this.manager
+      .createQueryBuilder()
+      .delete()
+      .from(FileEntity)
       .where('id = :id AND status = :pending', { id, pending: 'PENDING' })
       .execute();
     return result.affected === 1;
